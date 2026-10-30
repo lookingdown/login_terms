@@ -19,7 +19,7 @@
   - the sale and its unit
   - the late attach
   - the POS selling the unit it selects
-  - no attach in assembly
+  - an order never takes a bike that is still in assembly (S10)
   - a bike with a person being a customer's
   - materials never in the layer
 - **The database side is the plan's:**
@@ -216,6 +216,10 @@ The details and their probe went to Johan directly. They stay out of this reposi
 - **S7. The opening maps every legacy value**, including `serials.status` `warranty` and `transferred`, and `loans.status` `perdida`.
 - **S8. An approval** names its event and its unit (`approvals.ref_type`, `ref_id`), is approved, and is used once.
 - **S9. A posting function refuses an empty `app.user`.** `app_enter(…, NULL)` sets it to `''`, and `app_at_master()` alone would still pass. A cron job posts as a named user. `app_enter` sets the session for the whole connection (`set_config(…, false)`); behind a transaction-pooling pgbouncer it would have to be per transaction.
+- **S10. Say exactly what §0.5 refuses.** An *order* cannot take a bike that is still in assembly: `claim_sale` refuses a unit in `validating`.
+  - Assembly's own link between a job and its unit is assembly's document, not a claim, and no claim or event may refuse it. That link is `assembly.serials_id`, set by assemblyPickRow and assemblySetNumber while the bike is on the bench.
+  - `movement_built` even needs that link: it refuses a unit that is not the job's (plan event 3).
+  - Related, for Johan: plan event 4 (back to the bench) is refused for a claimed unit, and it posts only (L·L·available) → (L·L·validating). So a bike already attached to an order, or paid and waiting for pickup, that fails its final check could not go back to the bench. The model's "assembly failed (QA)" (movements.md §4) moves only the state, whoever owns the bike.
 
 ## 6. Corrections to my first review
 
