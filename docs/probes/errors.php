@@ -1,7 +1,7 @@
 <?php
 /**
  * How a coded refusal, a list argument and a composed Select travel through PDO and Atlas Query.
- * Review findings 4, 6, 9 and 11.
+ * Review M7, M8 and M9.
  *
  *   composer require atlas/query:^2
  *   PGHOST=… PGPORT=… PGDATABASE=scratch PGUSER=… php errors.php [path/to/vendor/autoload.php]

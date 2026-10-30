@@ -1,288 +1,254 @@
-# Review of movements-core.md (revision 1)
-
-**Verdict: approve the direction, and approve the six points with the changes below.** The architecture is right. What needs changing is mostly in the contracts that modules will be written against:
-- what a view column promises
-- what a refusal does to the caller's transaction
-- what a retry does
-- how the facts reach PHP
-
-These are cheap to change now and expensive once step A ships. Step A starts on approval, so findings 1–5 come first.
-
-**How this was checked.** I had the plan, the design principles, the ER diagram, `MovementService.php` and `ReceiveLine.php`. I did not have `movements.md`, `movements-code.md`, `atlas-manual.txt`, the modules or core's `SerialUnavailable`. Findings about the layer's tables are therefore marked *check against movements.md*.
-
-Every technical claim marked "lab" was run on PostgreSQL 18.6 (ICU), PHP 8.3 `pdo_pgsql` and Atlas Query 2.0.0, with `ci_ai` defined as a nondeterministic ICU collation (`und-u-ks-level1`). The scripts are in `probes/`; re-run them with the house's own `ci_ai` if its definition differs.
-
-## What to keep
-
-- **The database posts.** PHP, cron and psql all write, so the guards have to live with the data. One function per event, one transaction.
-- **Coded refusals.** The draft's `translate()` matches about thirty English phrases. If one message is reworded, its refusal silently becomes a generic error. A SQLSTATE doesn't drift: in the lab, `getCode()` returns `'MVR07'` exactly as raised.
-- **Cells, not virtual locations.** Where a unit is and who owns it really do diverge: a bike sold but not yet delivered, a rental, a unit one store owns while another holds it. A negative location id can't express "here, but the customer's".
-- **Selects over views.** They fit how modules already build queries, and they avoid a fixed-question API that grows with every screen.
-- **The read side first.** Step A puts a stable interface in place before anything underneath it moves.
-
-## Findings
-
-Each finding says when it has to be settled: before step A (the reading contract), before step B (the writing contract) or before step C (the switch).
-
-### Before step A: the reading contract
-
-#### 1. Collation is part of a view's contract, and the switch can change it silently
-
-**The plan says** "the views' columns are the contract, so nothing a module writes changes at the switch."
-
-**What happens.** With `ci_ai`, a column's behaviour depends on its collation as well as its name and type. In the lab:
-- A step-A view over `serials.serial_number` (ci_ai) finds a chassis typed in lower case.
-- The same view redefined in step C over a layer column declared plain `text` returns 0 rows for the same filter.
-- Columns the view computes (a CASE over literals, `->>`, `||`) come out in the default collation, so `state = 'Available'` finds nothing.
-
-```
- view             | column        | type                   | collation
- unit_positions_a | serial_number | character varying(100) | ci_ai     ← step A, over serials
- unit_positions_a | state         | text                   | default   ← computed by CASE
- unit_positions_c | serial_number | text                   | default   ← step C, over a layer column without COLLATE
-```
-
-**Change.**
-- Every text column a module may filter, sort or join on is `ci_ai` in the view, inherited or set with an explicit `COLLATE ci_ai`.
-- The layer's text columns are declared `COLLATE ci_ai`, as every migrated table's are.
-- A view contract test pins the name, type and collation (`pg_attribute.attcollation`) of every column, for both the A and the C definitions.
-
-#### 2. On ci_ai columns, search with LIKE, and never put a trigram index on one
-
-**What happens** on 18.6 (lab):
-
-| | result |
-|---|---|
-| ci_ai: `LIKE '%acao%'`, `NOT LIKE` | work; ignore case and accents (finds "Ação"), as MySQL did |
-| ci_ai: `ILIKE`, `NOT ILIKE` | `ERROR: nondeterministic collations are not supported for ILIKE` |
-| ci_ai: `~`, `~*` | `ERROR: … not supported for regular expressions` |
-| ci_ai: `starts_with()` | `ERROR: … not supported for substring searches` |
-| ci_ai: `strpos()`, `replace()` | work |
-| plain column: `ILIKE '%acao%'` | ignores case but **not accents**: doesn't find "Ação" |
-
-There is also a trap. With a `pg_trgm` GIN index on a ci_ai column, the planner uses the index for `LIKE '%acao%'` under default settings and returns **0 rows**; a sequential scan of the same table returns **1**. The trigram index folds case but not accents, so the row never reaches the recheck. The same query gives a different answer depending on the plan.
-
-**Change.**
-- The plan states **PostgreSQL 18 minimum**, for `_testpg` and any CI image too: before 18, LIKE on a nondeterministic collation is an error.
-- The README's rule: on ci_ai columns, LIKE and NOT LIKE (the plan's own example already uses LIKE); never ILIKE, regular expressions or `starts_with()`.
-- No trigram index on a ci_ai column. If a search gets slow, add a separate search column, folded for case and accents in a deterministic collation, with its own index, and search that column.
-
-#### 3. The views must run with the reader's rights (`security_invoker`)
-
-**What happens.** A plain view runs with its owner's rights. When the owner also owns the tables, RLS doesn't apply. In the lab, a seat at location 1 reads **2** rows from the table, **4** through a plain view and **2** through a `security_invoker` view. Without the option, Positions would hand every module the other stores' units.
-
-**Change.**
-- Every Positions view is created `WITH (security_invoker = true)`.
-- The contract test asserts the option (`pg_class.reloptions`).
-- One test reads each view as a seat of another location.
-
-#### 4. `count()` and `asOf()` as sketched give wrong results
-
-**count()**, "clone, resetColumns/OrderBy/Limit, COUNT(*)": on a grouped or DISTINCT select, the lab returns `[{"count":5},{"count":5}]` for a result of 2 rows, so `fetchValue()` gives 5. Counting the stripped clone as a derived table gives 2:
-
-```php
-Select::new($db)->columns('COUNT(*)')->from((clone $q)->resetOrderBy()->resetLimit()->as('c'))->fetchValue();
-```
-
-The README's "or clone and reset" goes.
-
-**asOf(Select, t)** would have to swap the FROM to turn `onHand()` into `stock_at(t)`. In Atlas the joins live in the From component, so `resetFrom()` drops the consumer's joins; in the lab the `LEFT JOIN` vanished from the SQL. `units()` has no time twin to swap to anyway, because `unit_at(id, t)` answers for one unit. **Change:** choose the point in time when the Select is born. `onHandAt(DateTimeImmutable $at, ?Select $parent = null)` and `unitsAt(…)` go over set-returning functions with the same columns as their present-tense twins.
-
-**Two smaller API points.**
-- Take `?Select $parent` and call `$parent->subSelect()` inside Positions. A `?Select $on` parameter accepts any Select, and a Select that isn't a sub-select gets a second FROM.
-- Accept an optional alias, for a query that uses the same view twice.
-
-#### 5. Step A must move the readers, and it can produce the proof for the switch
-
-**What happens.** Step A lists Positions, the README and the views, but not moving the modules' reads. Any reader left for step C makes "no consumer changes at the switch" untrue.
-
-**Change.**
-- **Step A ends when no module reads legacy state.** A read tripwire fails the build: a CI grep for `serials.status`, `serials.location_id`, `serials.transfers_id`, `stock`, `stock_balances`, `variants.stock`, `stock_after` and `serial_events` outside `/var/sys/core/movements/`.
-- **Each step-A view documents how it derives the new columns from today's tables, and where that is approximate** (owner, claims, `since`, `word`). A module written against degenerate values, such as an owner that always equals the location, breaks at C.
-- **Step A's definitions stay as `legacy_*` views.** On the ported data, `legacy_x EXCEPT x` must be empty, or match a written list of expected differences. That diff is the proof of "nothing a module writes changes at the switch", and the plan's own structure provides it for free.
-
-### Before step B: the writing contract
-
-#### 6. A refusal poisons the caller's transaction
-
-**What happens.** Inside an open transaction, the next statement after a coded refusal fails with `25P02 current transaction is aborted` (lab). "Let a Refused reach the dispatcher" only works if every caller rolls back the whole request. Any "try, else …" flow dies on its next statement: a POS fallback, a batch closing several counts, a refusal written to a log table. With a `SAVEPOINT` around the call, the event alone is undone and the next statement runs (lab).
-
-**Change.**
-- When Ledger and Claims join a transaction, each call runs in its own savepoint: released on success, rolled back on a refusal. The README says: *a Refused undoes only its event; your transaction stays usable*.
-- Events whose documents the module writes (`arrive`, `dispatch`, `sell`, `handOver`, `closeCount`) **require** the caller's transaction and throw a `LogicException` without one. Silently owning a transaction would commit the event apart from the module's own writes.
-
-#### 7. Retries and double submits post twice
-
-**What happens.** Scanners and forms resend after a timeout. A retried partial `arrive()` receives the same lines again while they are still on the road. A retried `dispatch()` reports "refused" for something that succeeded. Nothing in the plan recognises a repeat.
-
-**Change.**
-- Every event gets a header row with a `UNIQUE` key. A repeat with the same key and the same arguments returns the first answer and posts nothing; the same key with different arguments is refused.
-- In PHP, Ledger and Claims are built with the request's key (the form's or the scanner's token), and each call's key is that key plus the call's ordinal.
-- The module's documents and its postings commit together, so a posting under the request's key means the whole request committed. `$ledger->replayed()` answers that at the start of a request, before the module writes its documents a second time.
-- The functions' signatures are the contract: add the key now, rather than to 25 functions later.
-
-#### 8. "Every invariant a constraint": two of the four need a structure, and that structure is also the lock
-
-*Check against movements.md.*
-
-**What happens.** "A unit's chain is unbroken" and "nothing negative at a place" are rules across rows. A CHECK can't see other rows, and a trigger that sums the ledger is slow and racy. Plain constraints can enforce both (lab, `probes/ledger.sql`):
-
-- **The chain.** One row per hop of a unit, `PRIMARY KEY (serials_id, seq)`, with a composite FOREIGN KEY from `(serials_id, prev_seq, from-cell)` to `(serials_id, seq, to-cell)`. A fork, a skipped step and a hop from a road the unit isn't on are all refused.
-- **Two tills selling the same bike** (`probes/race.sh`): the second waited about 2 s for the first to commit, then got a unique violation. One sale exists, without an advisory lock.
-- **The cell columns are `NOT NULL` (kind + id).** A foreign key skips its check when any of its columns is NULL. The typed foreign keys to `locations` and `transfers` hang on `STORED` generated columns (lab; 18's default VIRTUAL kind can't carry one).
-- **The balances.** A balance row per cell × variant with `CHECK (qty >= 0)`, written by the posting functions, refuses going negative, and its row lock serialises racing tills. The road is a cell too, so arriving more than was dispatched is refused by the same CHECK (lab).
-- **Two PostgreSQL 18 features.** `PRIMARY KEY (serials_id, during WITHOUT OVERLAPS)` (with `btree_gist`) refuses a backdated residence that overlaps an existing one (lab). `RETURNING old.qty, new.qty` gives `adjust()` its answer in one statement (lab).
-
-**Consequence for the wording.** "State is a query, never a column" becomes **"state is derived, never hand-written."** A current-position row and a balance row are written only by the posting functions, in the event's own transaction, and a view proves they equal the ledger. That is not the four-writers problem. It also keeps the hot reads (the POS picker, the Seriais list) proportional to what is on the shelf. Answered from the ledger alone, "what is here now?" has to look at every hop that ever reached this place, so each read grows with the history.
-
-**Also.**
-- The layer gets an **event header** (kind, occurred_at, created_at, users_id, document, key, the event it reverses), with its moves under it. Movimentações lists events, not legs.
-- **One lock order.** Every function that touches units first locks their `serials` rows, `ORDER BY id FOR NO KEY UPDATE`. Claims and moves then serialise on the same row, and foreign-key checks from other tables don't wait behind it.
-- **Check under that lock, then refuse with a code.** A constraint that fires anyway means a race or a bug. A `unique_violation` on the hop key is caught inside the function and raised again as a coded refusal.
-
-#### 9. The facts don't arrive by code: they are inside the message text
-
-**What happens.** The code arrives clean. The facts don't, because PDO has no DETAIL field and `errorInfo[2]` is one block of text (lab; the probe already raises the `mv:` line proposed below):
-
-```
-ERROR:  a moto não está nesta loja
-DETAIL:  mv:{"facts": {"note": "linha 1\nlinha 2", "serials_id": 42}, "message": "a moto não está nesta loja"}
-CONTEXT:  PL/pgSQL function guard(bigint) line 3 at RAISE …
-```
-
-So getting the facts out means parsing text, and the labels around them get translated. The server's `lc_messages` (a superuser setting) translates the severity. libpq, in the PHP process's locale, translates `DETAIL:` and `CONTEXT:`, so an app that calls `setlocale(LC_ALL, 'pt_BR…')` can see `DETALHE:`. This container had no translations to show it; `probes/README.md` says how to check on your servers. Also, `getMessage()` is `SQLSTATE[MVR07]: <<Unknown error>>: 7 ERROR:  …`, which is not an operator message.
-
-**Change.**
-- One SQL helper, `mv_refuse(code, message, facts jsonb)`, raises `MESSAGE = message` and `DETAIL = 'mv:' || jsonb_build_object('message', message, 'facts', facts)`.
-- PHP reads that one line with `/mv:(\{.*\})$/m`. It is always one line, because `jsonb::text` escapes the newlines inside strings, so neither the labels nor CONTEXT matter (lab, including Portuguese labels).
-- **`Retry`** covers `40001`, `40P01` and `55P03`, with `lock_timeout` set for postings. It tells the operator "tente novamente", and with the keys from finding 7 a retry is safe.
-- A raw constraint violation, or any unmapped error, is a bug. It is logged with an incident id and shown as a generic message; PostgreSQL's own text never reaches the operator.
-- `Code.php` lists every MV code with its facts' keys. A test greps the SQL for `ERRCODE = 'MV…'` and fails when either side has a code the other lacks.
-
-#### 10. The dispatcher snippet doesn't keep the toasts working
-
-**What happens.** §6 says Refused "builds core's existing SerialUnavailable … so the screens' toasts and their buttons keep working unchanged". The snippet in §6 emits a `movement` key and never calls `unit()`. A Refused is not a SerialUnavailable, so the `serial` key the toasts read never appears.
-
-**Change.**
-```php
-+ ($e instanceof \Movements\Refused && ($unit = $e->unit()) ? ["serial" => $unit->facts()] : [])
-```
-Also check the HTTP codes. "→ 404 / 409 / 403" changes the responses if today's screens expect a 200 with an error in the body; keep the current convention unless the front end handles these codes.
-
-#### 11. `post()` as sketched can't call half the functions
-
-**What happens** (lab):
-- **`chassis text[]`:** `bindInline(array)` expands to `(:a, :b)`, which is a row, and the call fails with `cannot cast type record to text[]`.
-- **`movement_count_close`:** it returns a table, and `SELECT fn(…) AS result` gives strings like `"(1,9C2KC1650PR000001)"`.
-- **Errors escape:** Atlas runs the query on `fetch*()`, so when `post()` returns a Select the translation must wrap the fetch. Otherwise refusals escape as raw `PDOException`.
-
-**Change.**
-- Lists and lines are passed as `jsonb`, which is also safe for commas, quotes and braces in a chassis.
-- Every function answers `jsonb`, never a table: one call shape, and the stored answer of a repeated key (finding 7) is jsonb anyway.
-- `post()` executes, translates and decodes in one place.
-- Booleans need nothing: Atlas binds `PARAM_BOOL`, and the lab returned `false`.
-
-#### 12. Document words that are facts are still written by modules
-
-**What happens.** In §7's dispatch example, the module sets `transfers.status = 'sent'` and then calls `dispatch()`. The design principles derive sent, received and partial at the gate (governance rule 4). Two writers of "was it sent?" is the original problem in miniature. And because the status flips before `dispatch()` runs, the function can't guard "only a draft may leave": it has to accept 'sent' with no legs. `markDelivered`, "beside the order's own words", has the same shape.
-
-**Change.** Modules write intent: the lines, the carrier, the costs, the shop purchase. The function writes the fact word while the column still has one (`dispatch` flips draft → sent), and after C the views derive it.
-
-#### 13. Roles: "no module, script or psql session can move stock another way" needs spelling out
-
-**What happens.** In the lab, a new function is executable by `PUBLIC` by default. And RLS doesn't apply to a table's owner, so a view or a function owned by that owner bypasses it.
-
-**Change.**
-- The ledger's tables and functions belong to a `NOLOGIN` role, and the app connects as a non-owner.
-- Revoke INSERT, UPDATE, DELETE and TRUNCATE on the ledger and its projections. Revoke EXECUTE from PUBLIC and grant it to the app role (`ALTER DEFAULT PRIVILEGES`).
-- The functions are `SECURITY DEFINER` with a pinned `search_path`.
-- A trigger refuses UPDATE, DELETE and TRUNCATE on the ledger, the owner included.
-- RLS doesn't apply inside a SECURITY DEFINER function, so `Forbidden` comes from one helper every function calls, not 25 copies.
-- A function refuses when `app.user` is unset. Cron posts as a named system user.
-- `app.user` is attribution, not authentication: any session can set a custom setting. Behind pgbouncer in transaction pooling, the seat uses `set_config(…, true)` in each transaction.
-
-#### 14. Inside the functions, ci_ai doesn't reach variables
-
-**What happens** (lab).
-- A column compared with a parameter uses ci_ai and matches.
-- Two PL/pgSQL variables, or a value against an array with `= ANY`, compare in the default collation: `'9c2kc1…' = '9C2KC1…'` is false. A guard like "is the scanned chassis one of this remessa's units?" would refuse what the screen shows as matching.
-- A view that UNIONs a ci_ai column with a `"C"` column fails at `CREATE VIEW`. That matters if `unit_trajectory` unions an archive.
-
-**Change.**
-- Compare text through table columns, or declare text variables and arrays `COLLATE ci_ai`.
-- Test every guard with lower-case and accented input.
-
-#### 15. Time: chain order is posting order, and backdating needs a floor
-
-**What happens.** `correct()` takes `occurred_at`. A backdated hop posted after later hops makes posting order and business time disagree, so `stock_at(t)` and `unit_at(t)` show the unit in two places, or in none, for the overlap. And `timestamp(0)` can't order two hops in the same second.
-
-**Change.**
-- A unit's history is ordered by `seq`.
-- A unit's `occurred_at` is never earlier than its last hop's. A guard and a check view enforce it, or the residence key from finding 8.
-- A **lock date** (accounting's closed period): nothing posts before it. A correction older than that posts today, with the intended date in its note.
-- The ledger's timestamps are `timestamptz`. Brazil spans four time zones, and `created_at` is system time.
-
-#### 16. Claims: "one unit, one claim" needs one place to enforce it
-
-*Check against movements.md.*
-
-**What happens.** The claims live on three documents: `sales.serials_id`, `transfer_units` and the fleet. "At most one active claim per unit" can't be a constraint across three tables. It becomes a check inside each claim function, and each of them has to know every kind of claim.
-
-**Change.**
-- Keep each document's word, and add `unit_claims (serials_id, kind, ref, released_at)` with a unique index on `serials_id WHERE released_at IS NULL`. The claim functions write both, and a check view proves they agree.
-- Write down which claims may coexist (a fleet unit on a remessa hold?).
-- `dispatch` consumes the remessa's holds, and `sell` checks claims under the unit's lock.
-- Document that `Claims::attach()` on a paid line sells at once. It is the one place where a claim moves something.
-
-### Before step C: the switch
-
-#### 17. Split C into gated steps, and state the rollback stance
-
-**What happens.** Step C does four things at once: the writers switch, the views are redefined, the history is ported and the old state is retired. The draft had a soak and drift views; this plan dropped both.
-
-**Change**, inside the approved order:
-- **C1, rehearsal on a copy of production.**
-  - The opening goes into the ledger: one opening hop per unit, one balance per cell × variant.
-  - The old history (`serial_events`) becomes a read-only archive that `unit_trajectory` unions in. It is not replayed through the new constraints, which would reject its gaps.
-  - Gate: the `legacy_*` vs layer diff from finding 5 is empty.
-- **C2, the switch.**
-  - The writers move to Ledger and Claims, and the views move to the layer, in one release.
-  - The legacy columns are kept for one release, written from the ledger, for any reader the tripwire missed.
-  - The drift views run daily.
-- **C3, retirement,** after N clean days.
-
-**Rollback.** Once C2 posts, going back loses postings. Say "forward-fix only", and say why that is acceptable: the rehearsal, the diff and the kept columns.
-
-### Smaller corrections
-
-| § | issue | change |
+# Review of movements-core.md — second pass
+
+**2026-10-30.** This reviews **revision 1** of `movements-core.md`, the proposal, which is back in this folder.
+- It replaces my first review (commit 76ee902), which was written without the house's documents. §6 lists what that review got wrong.
+- My revision 2 of the proposal (commit 5875d57) is withdrawn for the same reason. Parts of it break Johan's rules.
+
+**Read against:**
+- **The draft's design ideas:** `DESIGN_PRINCIPLES.md`, the ER diagram, `MovementService.php`, `ReceiveLine.php`.
+- **The house's own documents:**
+  - the model: `movements.md`
+  - the plan: `movements-plan.md`
+  - the approved coding instruction: `movements-code.md`, with Johan's rules (§0) and the order (§1)
+- **Today's schema:** `impublic.sql`, the PostgreSQL 18.6 dump of `imobee`.
+- **The lab:** PostgreSQL 18.6, a `ci_ai` collation, PHP 8.3 `pdo_pgsql` and Atlas Query 2.0.0. The scripts are in `probes/`. Each claim marked "lab" comes from one of them.
+
+## Verdict
+
+- **The business rules are right.** The proposal follows each of rules §0.3–0.7:
+  - the sale and its unit
+  - the late attach
+  - the POS selling the unit it selects
+  - no attach in assembly
+  - a bike with a person being a customer's
+  - materials never in the layer
+- **The database side is the plan's:**
+  - one SECURITY DEFINER function per event, with its guards inside
+  - coded refusals with their facts
+  - claims as functions of their documents
+  - the user from the session
+- **The PHP side departs from the approved instruction without saying so**, and it drops parts of the approved plan (M1–M6).
+- **Several of the code sketches do not work as written** (M7–M11, each verified in the lab).
+- **One security finding concerns today's SECURITY DEFINER functions, and the new posting functions would inherit it** (M12, verified). Its details went to Johan directly, not into this public repository.
+
+**Not approvable as written.** With the twelve must-fixes below, it is.
+
+## 1. Against the design ideas
+
+The model keeps the draft's ideas, changing some of them on purpose (movements.md §12).
+
+| idea | the model | movements-core.md | |
+|---|---|---|---|
+| facts once, state derived | kept; balances stored in `positions` by a trigger, written by nobody (plan §1.1) | "state is a query (views), never a column" | contradicts the plan: M2 |
+| documents capture intent, movements capture fact | kept | kept | ✓ |
+| double entry | kept; each event balances per (variant, unit) | "balanced rows" | ✓ |
+| corrections are never edits | kept; `corrects_id`, and only a correction may be dated before a unit's latest leg (plan §1.3.5) | `correct()`, `notSent()`, `swap()` | ✓; the time rule is not stated: S4 |
+| one call per event | kept | one method per event | ✓ |
+| business words in one place | kept: `unitWord()` in serialState.php (plan §1.5) | a `word` column in unit_positions, and no unitWord() | two places: M5 |
+| new situations are new kinds of movement | kept | rent, loan and flip are events of their own | ✓ |
+| the health check is empty | kept | `movement_checks_*` | ✓ |
+| never in two places at once, enforced by the database | kept as an idea (movements.md §12) | "a unit's chain is unbroken", with no mechanism | S3: on 18 a temporal key does it natively |
+| point in time | kept | stock_at, unit_at, `asOf()` | asOf() is broken: M9 |
+| business time beside system time | kept: occurred_at, recorded_at, timestamp(0), the database's clock | occurred_at on `correct()` | ✓ |
+| one "location", with virtual places | changed to where · owner · state | cells | ✓ |
+| refusals told apart by their English text | — | SQLSTATE codes with their facts | better than the draft ✓ |
+
+**What not to port from the draft.** movements.md §12 says the same.
+- **`translate()`:** 27 English phrases decide the exception's type. Reword one message and that refusal silently becomes a generic error.
+- **`serialTrajectory()`:** `LEFT JOIN public.locations lt ON lf.id = tr.transfer_to_location` joins `lt` on `lf`'s id. The destination's name comes out empty.
+- **The constructor** changes the error mode, the default fetch mode and the emulated prepares of the PDO it is given. That affects every caller sharing it.
+- **`earmarkForTransfer()`** updates `serials.transfers_id` from PHP, a write outside the posting functions. The instruction replaces it with `transfer_units` and claim_hold.
+
+## 2. Against the approved plan and instruction
+
+### M1. The PHP shape departs from the approved instruction
+**What was approved:**
+- `core/positions.php` in step A and `core/movements.php` in step C (plan §0; code §2, §4, §5)
+- "functions, not classes", "built like core/serials.php"
+- `$pdo` as the first argument: `unitPosition($pdo, $id)`, `movementReceive($pdo, …)`
+
+**What is proposed:** a new directory, `/var/sys/core/movements/`, under the namespace `Movements`, with thirteen classes and enums: Ledger, Claims, Positions, three value objects, three enums and an exception tree. It is offered as point 2 for approval, but never as a change to what was approved.
+
+**Must:** align with the instruction, or put the change to Johan as a change, with its reason. **I recommend aligning.**
+- Nothing in the design needs classes, and core would gain a second convention.
+- Functions can return Atlas Selects just as well, e.g. `positionsUnits($pdo, ?Select $parent = null): Select`. That keeps the proposal's one real gain on the reading side.
+
+### M2. "Never a column" contradicts `positions`
+**What was approved** (code §3.1; plan §1.1, §6): `positions`, the balance per model and cell, kept by a trigger on movement_legs and read by the readings. It was chosen so the screens stay fast.
+
+**What is proposed:** "State is a query (views), never a column". `positions` appears only in the README's list of things never to write.
+
+**Must:** say what the plan says. Balances are stored and derived, and never written by hand:
+- the stock views read `positions`
+- unit_positions reads each unit's latest +1 leg
+
+The stored balance is also what makes "nothing negative at a place" a CHECK on `positions`, except for the books and a provider's side (plan §1.3.4). The lab shows such a CHECK refusing an arrival larger than what is on the road.
+
+Today's `stock_balances` shows the alternative: a `DISTINCT ON` over every `stock` row ever written.
+
+### M3. Step A lost its readers and its proof
+**What was approved** (code §1, §2, §6):
+- Step A is the read interface **and** the 41 reader files moved onto it, module by module.
+- Each module is proven by identical screens and answers before and after: its tests, plus a comparison of its read actions on _testpg and on a move of the live data.
+- Each module is deployed when it's done.
+- An old reader is removed when its last caller has moved, never left as a wrapper.
+
+**What is proposed** (§9): Positions, the README and the views, and nothing else. There is no before-and-after comparison, and nothing about removing the old readers.
+
+**Must:** restore step A as approved.
+
+### M4. The switch lost its guard and its proof
+**What was approved** (code §3.4):
+- **The guard:** the switch refuses while any class of discrepancy has a row.
+- **The opening:** it ports every unit's story as legs, and stops on a broken chain.
+- **The proof, inside the migration:** the views redefined on the layer answer exactly what the step-A views answered, and every trajectory tells the story unitTimeline told. Otherwise the migration rolls back.
+
+**What is proposed** (§9): "the views redefined on the layer, the opening (the history ported), the old state retired".
+
+**Must:** restore the guard and the proof. They are what make "no consumer changes at the switch" true.
+
+### M5. The read interface is incomplete, and the word has two homes
+Approved in code §2, and missing from Positions:
+- **`stockTotal()`:** the organisation's total per model. itemsedit reads `variants.stock` for it today, and that column goes at the switch.
+- **`transferProgress($pdo, $id)` over `road_by_transfer`:** per remessa, line and unit, with the remessa's state. `transfers.status` loses `received` at the switch (code §3.4.4), so the state has to come from here.
+- **`unitWord($pos)`** in serialState.php, keeping today's keys and labels. The proposal puts a `word` column in unit_positions instead, so the business words would live in two places.
+
+**Must:**
+- Add `stockTotal()` and `transferProgress()`.
+- Choose one home for the word. The plan's is serialState.php; if that stands, drop the column.
+
+### M6. Event contracts dropped what the plan needs
+
+| event | approved (code §4) | proposed | why it matters |
+|---|---|---|---|
+| receive | `$newReceived`, the line's new total | `received integer`: a total, or a delta? | A correction down (event 2) is a lower total, and a resent receipt carrying the same total posts nothing. `purchase_items.qty_received` is a total today. |
+| arrive | `$newReceived` per line, with its units | ReceiveLine, "units by id, or a quantity" | Today's `stock_transfer_receive` takes a delta, so a resent scan receives twice. It can never exceed what is on the road, but it can exceed what arrived. A new total fixes that. |
+| sell | "stamps the cost" | nothing | saleUnitCost reads it, and `sales.unit_cost` is where it goes. |
+| toProvider | `$supplierId` | no supplier | Event 21 posts (L·L) → (p·p). Without the supplier there is no cell. |
+
+**Must:** restore each of the four. Because receive and arrive post absolute totals, both can be resent safely without an idempotency key.
+
+## 3. Is the code valid?
+
+**As sketches.** The API blocks are signatures, not runnable PHP: a `final class` cannot declare methods without bodies. That's fine for a proposal. A few slips should still go:
+- `Claims` has no constructor, though the examples call `new Claims($pdo)`.
+- `post()` reads `$this->pdo`, while the constructor takes `$db`.
+- The enums need PHP 8.1 or later; check the servers.
+
+**Valid as written** (lab):
+- `whereEquals(['up.variants_id' => []])` → `FALSE`
+- a Select nested with `where('v.id IN ', $sub)`
+- additive `columns()`
+- `page()->perPage()`
+- a custom SQLSTATE arriving whole through `getCode()` (`'MVR07'`)
+- a PHP `false` bound as a boolean
+
+**Must fix** (each verified on PostgreSQL 18.6 with Atlas Query 2.0.0):
+
+### M7. The call path
+- **Lists.** `bindInline(['a', 'b'])` becomes `(:a, :b)`, which is a row, and `CAST(… AS text[])` fails with *cannot cast type record to text[]*. That breaks `movement_receive(… chassis text[])` and `claim_hold`/`claim_release(… serials_id integer[])`. Pass lists as `jsonb`.
+- **A table answer.** `movement_count_close` returns a table, and `SELECT fn(…) AS result` turns its rows into strings like `"(1,9C2KC1650PR000001)"`. Have it answer `jsonb`, as the other functions do.
+- **Translation.** Atlas runs the query only on `fetch*()`. If `post()` returns a Select, it can't translate the refusal, and refusals escape as raw `PDOException`s. Execute, translate and decode in one place.
+- **The caller's transaction.** After a refusal, every later statement in that transaction fails with `25P02 current transaction is aborted`. When a call joins a transaction, run it inside a savepoint: a refusal then undoes only its event, and rolling back the request stays the caller's decision. The approved "in the caller's transaction or one of its own" (code §4) has the same gap.
+
+### M8. Refusals must reach the screen
+- **Unit refusals.** Here the approved approach is right: a refusal about a unit becomes the existing `SerialUnavailable` (code §4), which every dispatcher already handles. The proposal's `Refused::unit()` doesn't reach the toasts. Its dispatcher snippet in §6 emits a `movement` key, and nothing emits the `serial` key the toasts read.
+- **The facts.** They arrive only inside the message text, between labels PostgreSQL may translate (`DETAIL:` or `DETALHE:`). `getMessage()` itself reads `SQLSTATE[MVR07]: <<Unknown error>>: 7 ERROR:  …`.
+  - Raise one fixed line from one SQL helper: `DETAIL = 'mv:' || {"message", "facts"}`.
+  - Read only that line in PHP. jsonb escapes newlines, so the line is always whole.
+- **Anything else is a bug.** That means a constraint firing without a coded refusal, or any unmapped error. Log it, and show a generic message, never PostgreSQL's own text.
+
+### M9. Reads that give wrong answers
+- **count().** Its "clone, resetColumns, COUNT(*)" returns one group's count on a grouped or DISTINCT select: 5 for a result of 2 rows. Count over a derived table instead.
+- **asOf()** has to swap the FROM clause. Atlas keeps joins inside the FROM, so `resetFrom()` drops the module's joins. And `units()` has no time twin to swap to. Choose the point in time when the Select is created instead: `onHandAt($at)`, `unitsAt($at)`.
+- **The views must be `security_invoker`.** A plain view runs as its owner, and RLS doesn't apply to a table's owner. In the lab, a seat at location 1 read 2 rows from the table but 4 through a plain view. Today's `stock_balances` is exactly that: a plain view, owned by `sys_owner`. If `stock` has RLS, that view already reads past it.
+
+### M10. ci_ai must hold through the switch
+- **A column's collation is part of the contract.**
+  - A step-A view over `serials.serial_number` (`ci_ai`) finds a chassis typed in lower case. The same view over a layer column declared plain `text` finds nothing.
+  - Computed columns (CASE, `->>`) come out in the default collation.
+  - Declare the layer's text columns `COLLATE ci_ai`, as every migrated table's are.
+  - Give a computed column `COLLATE ci_ai` whenever a module filters on it.
+  - The view contract test pins each column's collation, along with its name and type.
+  - The schema keeps `locations` in the default collation; the contract keeps whatever today's column has.
+- **On ci_ai columns, LIKE and NOT LIKE work, and ignore case and accents**, as MySQL's `utf8mb4_0900_ai_ci` did. ILIKE, regular expressions and `starts_with()` raise errors there. The README example's LIKE is right.
+- **No trigram index on a ci_ai column.** The planner uses it for `LIKE '%acao%'` and finds 0 rows, where a sequential scan finds "Ação".
+- **Inside PL/pgSQL, ci_ai reaches columns but not variables.** Two text variables, or a value tested against an array with `= ANY`, compare in the default collation. A guard like "is the scanned chassis one of this remessa's units?" would then refuse a chassis typed in lower case. Compare through columns, or declare the variables `COLLATE ci_ai`.
+
+### M11. Grants and roles
+- **EXECUTE.** PostgreSQL grants EXECUTE on every new function to PUBLIC. "The application has SELECT only" (code §3.1) doesn't stop any other role from running a posting function. Revoke EXECUTE from PUBLIC through the owner's default privileges, and grant it to the application's role.
+- **The owner.** In the dump, every object is owned by `sys_owner`. If the application connects as `sys_owner`, neither RLS nor the planned SELECT-only grant applies to it: a table's owner bypasses RLS (unless FORCE ROW LEVEL SECURITY is set) and holds every privilege. Check which role the seats connect as.
+
+## 4. Against the PostgreSQL schema
+
+### M12. A security finding about the SECURITY DEFINER functions
+The details and their probe went to Johan directly. They stay out of this repository while it is public. The fix applies to every new posting function and to the existing ones.
+
+**What the schema confirms:**
+- the id types behind the proposal's signatures: serials and locations `int4`; variants, transfers, sales, orders, assembly, loans and approvals `int8`
+- `purchase_items.qty_received` is a total (M6), and `sales.unit_cost` is where the cost goes (M6)
+- `approvals.ref_type`/`ref_id` can name the unit an approval is for (S8)
+- `resources.serials_id` is the fleet's unit, and `claim_fleet`'s "resource id" is `resources.id`, an `int4` (S2)
+- `loans` has no customer yet (migration 026)
+- `app_user_superadmin()` exists and an admin check doesn't, as code §3.3 says
+- 009 already takes its advisory locks in one order: the road, then the location, per variant in ascending order. Keep that order in the new functions.
+- `stock_transfer_dispatch` requires the remessa to be `sent` already, and refuses one already on the road. So the proposal's example, which writes `sent` and then dispatches, is the house's working pattern.
+
+**What it raises** (§5):
+- `stock_count_lines` keeps no time per counted line (S6).
+- The legacy vocabularies the opening must map include `serials.status` `warranty` and `transferred`, and `loans.status` `perdida` (S7).
+- `app_enter()` allows an empty `app.user` (S9).
+- Some references disagree with their key's type: `loans.serials_id` and `resources.serials_id` are `int8` against `serials.id int4`, and `stock_count_lines.variants_id` is `int4` against `variants.id int8`. The layer's foreign keys follow the keys.
+
+**Not in the dump:** Navicat leaves out RLS policies, privileges and the definition of `ci_ai`. The lab assumed `CREATE COLLATION ci_ai (provider = icu, locale = 'und-u-ks-level1', deterministic = false)`.
+
+## 5. Should
+
+- **S1. Names.** The approved names (plan §7.2; code §2, §3.3, §4) are `road_by_transfer`, `claim_sale`/`claim_sale_release`, `MovementRefused` and `MV0nn`. The proposal uses `road`, `claim_attach`/`claim_detach`, `Refused`/`NotFound`/`Forbidden` and `MVN`/`MVR`/`MVF`. Splitting the codes by kind is an improvement. Either use the approved names or list each rename for Johan.
+- **S2. Small mismatches.**
+  - The function table gives unsell a qty. Code §4 and the PHP signature have none, so the table is what's wrong.
+  - The flip belongs to step D, after the switch, and needs the new admin check.
+  - `claim_fleet`'s resource id should be typed `integer`.
+- **S3. "Never in two places at once", enforced by the database itself.** The model keeps this idea (§12), but the plan enforces the chain only inside the post functions. On PostgreSQL 18, `PRIMARY KEY (serials_id, during WITHOUT OVERLAPS)` on a residence projection refuses an overlapping residence natively. The projection would be kept by the same trigger as `positions`, and it needs btree_gist. In the lab it refused a backdated overlap. This is the draft's `serial_residence`, without the hand-built EXCLUDE.
+- **S4. State the time rule.** Only a correction (`corrects_id`) may be dated before a unit's latest leg (plan §1.3.5), and `correct()` never targets a customer's ownership (event 24: "never a sale").
+- **S5. Keep a cell whole.** `num_nonnulls(…) <= 1` per axis allows a place without an owner. Add a CHECK that where and owner are both set, or both "the books".
+- **S6. A count's cutoff.** Sales go on while a count is `contando`, and `stock_count_lines` has no counted time. Either keep one per line and compare with `stock_at(counted_at)`, or state that the expected quantities are taken at the close.
+- **S7. The opening maps every legacy value**, including `serials.status` `warranty` and `transferred`, and `loans.status` `perdida`.
+- **S8. An approval** names its event and its unit (`approvals.ref_type`, `ref_id`), is approved, and is used once.
+- **S9. A posting function refuses an empty `app.user`.** `app_enter(…, NULL)` sets it to `''`, and `app_at_master()` alone would still pass. A cron job posts as a named user. `app_enter` sets the session for the whole connection (`set_config(…, false)`); behind a transaction-pooling pgbouncer it would have to be per transaction.
+
+## 6. Corrections to my first review
+
+The first review was written without the house's documents. With them, these recommendations go or change:
+
+| first review | now | because |
 |---|---|---|
-| 4 | `unsell(int $saleId, string $why)` has no qty; its function takes one | add `int $qty` |
-| 4 | `notSent(int $transferId, ReceiveLine ...$lines)` has no note; its function takes one | add `string $note` |
-| 4 | `Claims::replace()` has no function in §3's table; `detach(int $saleId)` vs `claim_detach(sales_id, serials_id)` | add `claim_replace`; one shape for detach |
-| 4 | `writeOff(…, string $reason, …)` but `adjust(…, Reason $reason, …)` | `Reason` for both |
-| 4 | method names mix commands and facts (`built`, `backToBench`) | methods imperative (`build`, `returnToBench`); `Kind` in the past tense |
-| 4 | `adjust()` and `returnFromCustomer()` take no location | explicit `$locationId`, authorised against the seat |
-| 4 | `approvals_id` is unbound | the approval names the event and the unit, is approved, and is used once |
-| 3 | a count closes while sales go on | each line keeps when it was counted; difference = counted − `stock_at(counted_at)`; a unit read here that the ledger puts elsewhere comes back as `found` |
-| 3 | event catalogue to confirm | back from the provider (unless `to_provider` is final); a customer's bike in for service; parts consumed by assembly or the workshop; what `removeUnit` means for the chassis; bulk on a draft remessa |
-| 5 | `owned_elsewhere` is ambiguous: ours elsewhere, or others' here? | define it, or make two views |
-| 3 | cost | decide now whether movements carry `unit_cost`; porting it later is painful |
-| 8 | function bodies spread over numbered migrations | one file per function and per view, re-applied when it changes |
-| 8 | tests to add | two-connection races; a repeated key; Portuguese labels; chassis in lower case and names with accents; each view read by another location's seat; random event sequences with every check view empty after each |
-| — | the attached diagram shows the rejected model (virtual locations, the earmark column) | ship a diagram of the chosen layer with the plan |
-| 3 | JSON line payloads | refuse unknown keys, so a typo isn't silently ignored |
-| 3 | fiscal | if `flip` or `dispatch` needs an NF-e first, the function checks it |
+| point 2 (the directory and the namespace): approve as is | not as is (M1) | the approved instruction is functions in core/positions.php and core/movements.php |
+| C2: keep the legacy columns one release, written from the ledger | withdrawn | rule §0.1: nothing kept alive for an old reader, no bandaids |
+| C1: archive the old history instead of porting it | withdrawn | Johan decided to port every unit's story as legs (code §3.4.2) |
+| split C into C1–C3, with a soak | withdrawn | the approved switch is one release, with its proof inside the migration and its rehearsal on a move of the live data |
+| the chain as a constraint (hops with a composite key) | optional | the approved legs carry nullable cells and enforce the chain in the post functions, under the unit's lock; S3 covers "never in two places at once" |
+| a `unit_claims` table | optional | claims stay on their documents, and every claim function locks the unit FOR UPDATE (code §3.3), so one claim at a time is already race-safe |
+| idempotency keys on every event | only for events that post a delta | receive and arrive post totals (M6), and the other events are guarded by state |
+| a `Retry` exception, one lock order | optional | 009 already locks in one order |
+| the fact words belong to the functions; write `sent` after dispatch | withdrawn | 009's dispatch requires `sent` and refuses a remessa already on the road |
+| unsell needs a qty | withdrawn | the approved unsell has none (S2) |
+| adjust needs an explicit location | withdrawn | the approved adjust takes the seat's location |
+| `owned_elsewhere` is ambiguous | withdrawn | code §2 defines it: what a location owns standing elsewhere |
+| timestamptz | a note only | the plan chose timestamp(0) and the database's clock; `locations.timezone` is there for display |
+| rename built / backToBench | withdrawn | the approved event names are "built" and "back to the bench" |
+| an event header, stored balances | already approved | `movements` and `positions` (code §3.1); the proposal only has to stop contradicting them (M2) |
+| move the readers in A, and diff A against C | already approved | code §1 and §3.4.3; the proposal dropped them (M3, M4) |
 
-## The six points
+**What still stands from the first review:** M7–M11, S3, and its roles finding, which M12 extends.
+
+## The six points, again
 
 | # | point | verdict |
 |---|---|---|
-| 1 | the database posts; PHP is a typed facade plus reading | **approve**, with §3 gaining the roles (13), the constraints and lock order (8), ci_ai inside the functions (14), time (15) and the event key (7) |
-| 2 | `/var/sys/core/movements/`, namespace `Movements` | **approve** as is |
-| 3 | Atlas Selects over documented views | **approve with** 1–5: collation and `security_invoker` in the contract, count over a derived table, `*At()` constructors, `$parent`, the contract test, the readers moved in A |
-| 4 | one method per event, claims apart | **approve with** 6, 7, 12, 16 and the smaller corrections |
-| 5 | typed errors with their facts | **approve with** 9 and 10: the `mv:` line, `Retry`, the code catalogue, the `serial` key |
-| 6 | the README as the consumer guide | **approve**; it gains the search rule, the transaction semantics, repeats, the code catalogue and the column contract |
-
-Revision 2 of `movements-core.md` applies all of this, and its §11 maps each change to these findings. It also adds a seventh point to approve: the gates of §9.
+| 1 | the database posts; PHP is a facade plus reading | approve: it is the plan's, with M12 |
+| 2 | `/var/sys/core/movements/`, namespace `Movements` | not as written: M1 |
+| 3 | Atlas Selects over documented views | approve the views as the contract (code §2), with M9 and M10; the Select helpers become functions |
+| 4 | one method per event, claims apart | approve in substance, with M6, M7 and the approved names (S1) |
+| 5 | typed errors with their facts | approve with M8 |
+| 6 | the README as the consumer guide | approve; it gains the search rule (M10) and the transaction rule (M7) |

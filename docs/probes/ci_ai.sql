@@ -1,5 +1,5 @@
 -- What ci_ai does to a view, a search and a posting function, on PostgreSQL 18.
--- Review findings 1, 2 and 14.
+-- Review M10.
 --
 -- Run on a UTF-8 scratch database:   psql -d scratch -f ci_ai.sql
 -- Some statements fail on purpose: each \echo says what to look for.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two tills sell the same bike at once. Review finding 8.
+# Two tills sell the same bike at once. Review §6 (optional: the chain's key as the lock).
 # The hop key alone serialises them: till B waits for till A's commit, then is refused; one sale exists.
 #
 #   PGDATABASE=scratch bash race.sh        (any psql connection settings work: PGHOST, PGPORT, PGUSER …)

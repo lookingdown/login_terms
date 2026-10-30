@@ -1,5 +1,5 @@
 -- The ledger's invariants as plain constraints, and the roles that make "no other way" true,
--- on PostgreSQL 18. Review findings 3, 8, 13 and 15.
+-- on PostgreSQL 18. Review M2, M9, M11 and S3; part 1, the chain as a constraint, is optional (review §6).
 --
 -- Run as a superuser (it creates two roles and drops them) on a scratch database:
 --   psql -d scratch -f ledger.sql
