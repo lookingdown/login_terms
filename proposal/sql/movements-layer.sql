@@ -306,9 +306,115 @@ SELECT variants_id, SUM(qty)::int4 AS qty
  WHERE owner_location_id IS NOT NULL AND state <> 'written_off'
  GROUP BY variants_id;
 
+-- The time axis (the draft's f_stock_at / f_serial_at): stock_on_hand and a unit's position as they stood at a moment.
+CREATE FUNCTION public.stock_at(p_at timestamp) RETURNS TABLE (location_id int4, variants_id int8, qty int4)
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT l.at_location_id, l.variants_id, SUM(l.qty)::int4
+      FROM movement_legs l JOIN movements m ON m.id = l.movements_id
+     WHERE m.occurred_at <= p_at AND l.at_location_id = l.owner_location_id AND l.state IN ('validating', 'available')
+     GROUP BY l.at_location_id, l.variants_id
+    HAVING SUM(l.qty) <> 0
+$$;
+
+CREATE FUNCTION public.unit_at(p_serial int4, p_at timestamp) RETURNS SETOF public.movement_legs
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT l.* FROM movement_legs l JOIN movements m ON m.id = l.movements_id
+     WHERE l.serials_id = p_serial AND l.qty = 1 AND m.occurred_at <= p_at
+     ORDER BY m.occurred_at DESC, l.id DESC LIMIT 1
+$$;
+
+-- The health checks (the draft's v_recon_*): each must answer nothing. Anything found is fixed by a movement.
+-- An event balances per model and unit.
+CREATE VIEW public.movement_check_balance AS
+SELECT movements_id, variants_id, serials_id, SUM(qty) AS net
+  FROM movement_legs GROUP BY movements_id, variants_id, serials_id HAVING SUM(qty) <> 0;
+
+-- A unit is one chain: each −1 leaves the cell the unit's previous +1 put it in (the first leaves the books).
+CREATE VIEW public.movement_check_chain AS
+SELECT o.id AS leg_id, o.serials_id, prev.id AS previous_leg_id
+  FROM movement_legs o
+  LEFT JOIN LATERAL (SELECT i.* FROM movement_legs i
+                      WHERE i.serials_id = o.serials_id AND i.qty = 1 AND i.id < o.id
+                      ORDER BY i.id DESC LIMIT 1) prev ON true
+ WHERE o.serials_id IS NOT NULL AND o.qty = -1
+   AND CASE WHEN prev.id IS NULL
+            THEN num_nonnulls(o.at_location_id, o.at_transfer_id, o.at_customer_id, o.at_supplier_id) > 0
+            ELSE (o.at_location_id, o.at_transfer_id, o.at_customer_id, o.at_supplier_id,
+                  o.owner_location_id, o.owner_customer_id, o.owner_supplier_id, o.state)
+                 IS DISTINCT FROM
+                 (prev.at_location_id, prev.at_transfer_id, prev.at_customer_id, prev.at_supplier_id,
+                  prev.owner_location_id, prev.owner_customer_id, prev.owner_supplier_id, prev.state) END;
+
+-- positions is the fold of the legs, cell by cell.
+CREATE VIEW public.movement_check_positions AS
+SELECT variants_id, at_location_id, at_transfer_id, at_customer_id, at_supplier_id,
+       owner_location_id, owner_customer_id, owner_supplier_id, state, SUM(q) AS drift
+  FROM (SELECT variants_id, at_location_id, at_transfer_id, at_customer_id, at_supplier_id,
+               owner_location_id, owner_customer_id, owner_supplier_id, state, qty AS q FROM movement_legs
+        UNION ALL
+        SELECT variants_id, at_location_id, at_transfer_id, at_customer_id, at_supplier_id,
+               owner_location_id, owner_customer_id, owner_supplier_id, state, -qty FROM positions) x
+ GROUP BY variants_id, at_location_id, at_transfer_id, at_customer_id, at_supplier_id,
+          owner_location_id, owner_customer_id, owner_supplier_id, state
+HAVING SUM(q) <> 0;
+
+-- A serial-tracked model moves unit by unit, a counted one by quantity, and a unit as its own model
+-- (the draft's v_recon_serialized_bulk_mix).
+CREATE VIEW public.movement_check_serial_mix AS
+SELECT l.id AS leg_id, l.variants_id, l.serials_id
+  FROM movement_legs l
+  JOIN variants v ON v.id = l.variants_id JOIN items i ON i.id = v.items_id
+  LEFT JOIN serials s ON s.id = l.serials_id
+ WHERE (i.serial AND l.serials_id IS NULL) OR (NOT i.serial AND l.serials_id IS NOT NULL)
+    OR s.variants_id IS DISTINCT FROM CASE WHEN l.serials_id IS NULL THEN NULL ELSE l.variants_id END;
+
+-- Nothing stays on the road of a remessa that is not on its way.
+CREATE VIEW public.movement_check_roads AS
+SELECT p.at_transfer_id AS transfers_id, t.status, p.variants_id, p.qty
+  FROM positions p JOIN transfers t ON t.id = p.at_transfer_id
+ WHERE p.qty <> 0 AND t.status <> 'sent';
+
+-- RLS in the house's way (code §3.1): forced, with policies for app_staff and app_portal. The master reads all;
+-- a shop reads where it is the place or the owner, and the road of a remessa from or to it (transfers' own
+-- policies decide which remessas those are); the portal reads its own units, through a definer function.
+ALTER TABLE public.movements      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.movements      FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.movement_legs  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.movement_legs  FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.positions      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.positions      FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_units ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_units FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY movement_legs_read ON public.movement_legs FOR SELECT TO app_staff USING (
+    (SELECT app_at_master())
+    OR at_location_id = (SELECT app_location()) OR owner_location_id = (SELECT app_location())
+    OR at_transfer_id IN (SELECT t.id FROM transfers t));
+CREATE POLICY positions_read ON public.positions FOR SELECT TO app_staff USING (
+    (SELECT app_at_master())
+    OR at_location_id = (SELECT app_location()) OR owner_location_id = (SELECT app_location())
+    OR at_transfer_id IN (SELECT t.id FROM transfers t));
+CREATE POLICY movements_read ON public.movements FOR SELECT TO app_staff USING (
+    (SELECT app_at_master()) OR EXISTS (SELECT 1 FROM movement_legs l WHERE l.movements_id = movements.id));
+CREATE POLICY transfer_units_read ON public.transfer_units FOR SELECT TO app_staff USING (
+    transfers_id IN (SELECT t.id FROM transfers t));
+
+CREATE FUNCTION public.mv_portal_units() RETURNS SETOF int4
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT DISTINCT serials_id FROM movement_legs WHERE owner_customer_id = app_customer() AND serials_id IS NOT NULL
+$$;
+CREATE POLICY movement_legs_portal ON public.movement_legs FOR SELECT TO app_portal USING (
+    serials_id IN (SELECT mv_portal_units()));
+CREATE POLICY movements_portal ON public.movements FOR SELECT TO app_portal USING (
+    EXISTS (SELECT 1 FROM movement_legs l WHERE l.movements_id = movements.id));
+
 -- Grants: the application reads, and posts only through the functions (code §3.1).
 REVOKE ALL ON public.movements, public.movement_legs, public.positions, public.transfer_units FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs, public.positions, public.transfer_units, public.unit_positions,
-      public.stock_on_hand, public.stock_sellable, public.owned_elsewhere, public.road_by_transfer, public.stock_total TO app_staff;
-REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8) FROM PUBLIC;
+      public.stock_on_hand, public.stock_sellable, public.owned_elsewhere, public.road_by_transfer, public.stock_total,
+      public.movement_check_balance, public.movement_check_chain, public.movement_check_positions,
+      public.movement_check_serial_mix, public.movement_check_roads TO app_staff;
+REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units() FROM PUBLIC;
+GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
+GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
 GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8) TO app_staff;
