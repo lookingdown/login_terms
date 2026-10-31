@@ -170,3 +170,22 @@ $life = unitTrajectory($pdo, 504);
 check('its whole life: the line, the trail, the story', array_column(array_filter($life['line'], fn ($d) => $d['layer'] === 'fact'), 'why') === ['opening', 'built', 'back_to_bench']
     && array_column($life['trail'], 'state', 'key')['central'] === 'done'
     && in_array('assembly_started', array_column($life['events'], 'kind'), true), [array_column($life['trail'], 'state', 'key'), array_column($life['events'], 'kind')]);
+
+// receive and arrive (ledger.php), in a transaction undone after
+$pdo->beginTransaction();
+$got = movementReceive($pdo, 301, 2, ['9C2KC1650PR000011']);
+$dots = array_map(fn (int $u) => cubeDot($pdo, ['unit' => $u]), $got['units']);
+check('a delivery received: two bikes minted on the bench at the master', $got['received'] === 2
+    && array_column($dots, 'state') === ['validating', 'validating'] && array_column($dots, 'place') === ['location:1', 'location:1'], $got);
+try {
+    movementReceive($pdo, 301, 3, ['9C2KC1650PR000001']);
+    check('a number already a unit\'s is refused', false);
+} catch (MovementRefused $e) {
+    check('a number already a unit\'s is refused, with the unit that has it', $e->sqlState === 'MV036' && $e->facts['serials_id'] === 500, [$e->sqlState, $e->facts]);
+}
+$pdo->query("SELECT set_config('app.location', '2', true)");
+$came = movementArrive($pdo, 55, 311, 0, [500]);
+check('a remessa\'s bike arrived: Prudente\'s now, its two helmets still on the road', $came['units'] === [500] && $came['on_road'] === 2
+    && cubeDot($pdo, ['unit' => 500])['owner'] === 'location:2', $came);
+$pdo->rollBack();
+check('undone: bike 500 back on its road, the line as it was', cubeDot($pdo, ['unit' => 500])['place'] === 'road:55');

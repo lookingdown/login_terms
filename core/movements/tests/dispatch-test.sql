@@ -12,7 +12,7 @@ SELECT set_config('app.location', '1', false), set_config('app.user', '1', false
 -- guards keep a session to its own location); the layer's own trigger runs for every leg below
 SET session_replication_role = replica;
 TRUNCATE movement_legs, movements, positions, transfer_units, transfer_items, transfers, sales, orders, assembly,
-         serials, variants, items, users, locations RESTART IDENTITY CASCADE;
+         purchase_items, purchases, suppliers, serials, variants, items, users, locations RESTART IDENTITY CASCADE;
 INSERT INTO locations (id, code, name, kind) OVERRIDING SYSTEM VALUE VALUES (1, 'MTZ', 'Matriz', 'master'), (2, 'PRU', 'Prudente', 'shop');
 INSERT INTO users (id, name, login, email, password_hash, location_id, role) OVERRIDING SYSTEM VALUE
 VALUES (1, 'Johan', 'johan', 'j@example.com', 'x', 1, 'superadmin');
@@ -29,8 +29,16 @@ INSERT INTO transfers (id, shop_purchases_id, status, location_id, to_location_i
 VALUES (55, 1, 'draft', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '2 days 9 hours'),
        (56, 2, 'sent', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '2 days 9 hours'),
        (57, 4, 'sent', 1, 2, NULL);
-INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty)
-VALUES (55, 100, 10, 'MX-VERDE', 1), (55, 200, 20, 'CAP-M', 2), (56, 200, 20, 'CAP-M', 9);
+-- the documents receive-test.sql receives and arrives: a supplier's delivery at the master (order 10: two bikes,
+-- four helmets), and the shop's order of remessa 55 at Prudente (order 1), its lines on the remessa's
+INSERT INTO suppliers (id, name) OVERRIDING SYSTEM VALUE VALUES (5, 'Fornecedor Teste');
+INSERT INTO purchases (id, suppliers_id, supplier_name, status, location_id, source_location_id) OVERRIDING SYSTEM VALUE
+VALUES (10, 5, 'Fornecedor Teste', 'ordered', 1, NULL), (1, NULL, 'Matriz', 'ordered', 2, 1);
+INSERT INTO purchase_items (id, purchases_id, variants_id, items_id, sku, qty_expected) OVERRIDING SYSTEM VALUE
+VALUES (301, 10, 100, 10, 'MX-VERDE', 2), (302, 10, 200, 20, 'CAP-M', 4),
+       (311, 1, 100, 10, 'MX-VERDE', 1), (312, 1, 200, 20, 'CAP-M', 2);
+INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty, shop_purchase_items_id)
+VALUES (55, 100, 10, 'MX-VERDE', 1, 311), (55, 200, 20, 'CAP-M', 2, 312), (56, 200, 20, 'CAP-M', 9, NULL);
 INSERT INTO transfer_units VALUES (55, 500);
 INSERT INTO orders (id, ordercart_id, paid, status, location_id) OVERRIDING SYSTEM VALUE
 VALUES (900, 'c-900', false, 'pending', 1), (901, 'c-901', true, 'paid', 1);

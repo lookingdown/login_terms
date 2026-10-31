@@ -101,3 +101,34 @@ function movementBackToBench(PDO $pdo, int $serialId, int $assemblyId): array
 {
     return movementCall($pdo, 'movement_back_to_bench', [[$serialId, 'integer'], [$assemblyId, 'bigint']]);
 }
+
+/**
+ * Events 1 and 2, a supplier's delivery line received to its new total, or its receipt corrected down. Each new
+ * unit is minted on the bench, numbered when $numbers gives it one (in order); a correction down returns units that
+ * are nothing yet to the supplier. The line's qty_received follows. Refused: another location's order, a remessa's
+ * line (it arrives), a cancelled order, materials, a number already a unit's, more numbers than new units, a
+ * correction below units that are something already.
+ *
+ * @param list<string|array{serial_number?: string, observations?: string}> $numbers
+ * @return array{received: int, units: list<int>}
+ */
+function movementReceive(PDO $pdo, int $purchaseItemId, int $newReceived, array $numbers = []): array
+{
+    $numbers = array_map(fn ($n) => is_array($n) ? $n : ['serial_number' => (string) $n], array_values($numbers));
+    return movementCall($pdo, 'movement_receive', [[$purchaseItemId, 'bigint'], [$newReceived, 'integer'], [$numbers, 'jsonb']]);
+}
+
+/**
+ * Event 6, a remessa's line arrived at this location ($shopLineId: the shop's purchase line). The named units (the
+ * set the shop has) that are still on the road arrive; with none named, the oldest of the line's model, up to the
+ * new total; counted goods by quantity. What arrived does not go back. `on_road` is what the remessa still carries.
+ *
+ * @param list<int> $units
+ * @return array{arrived: int, units: list<int>, on_road: int}
+ */
+function movementArrive(PDO $pdo, int $transferId, int $shopLineId, int $newReceived, array $units = []): array
+{
+    return movementCall($pdo, 'movement_arrive', [[$transferId, 'bigint'], [$shopLineId, 'bigint'], [$newReceived, 'integer'],
+                                                  [array_values(array_map('intval', $units)), 'jsonb']]);
+}
+

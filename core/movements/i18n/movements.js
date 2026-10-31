@@ -135,6 +135,7 @@ export const movementMessages = {
 
     mvRefused_MV001: 'No user in this session: sign in again.',
     mvRefused_MV002: 'A movement cannot be dated before the unit’s last one ({last}): post a correction.',
+    mvRefused_MV003: 'A movement must balance per model.',
     mvRefused_MV010: 'A transfer leaves from the master.',
     mvRefused_MV011: 'Transfer #{transfers_id} not found.',
     mvRefused_MV012: 'Transfer #{transfers_id} has not been sent: it is {status}.',
@@ -150,6 +151,18 @@ export const movementMessages = {
     mvRefused_MV023: 'The unit stands at another location.',
     mvRefused_MV024: 'The unit is held by {claim} and cannot go back to the bench.',
     mvRefused_MV025: 'The unit is not in stock to go back to the bench: it is {state}.',
+    mvRefused_MV030: 'Purchase line not found.',
+    mvRefused_MV031: 'The order is another location’s.',
+    mvRefused_MV032: 'A transfer’s line arrives at the shop; it is not received as a delivery.',
+    mvRefused_MV033: 'The order is cancelled.',
+    mvRefused_MV034: 'A received total cannot be below zero.',
+    mvRefused_MV035: '{numbers} numbers for {units} new units.',
+    mvRefused_MV036: 'The number {serial_number} is another unit’s.',
+    mvRefused_MV037: 'Only {free} of {want} can go back: the others are something already.',
+    mvRefused_MV040: 'The transfer is addressed to another location.',
+    mvRefused_MV041: 'The line is not this transfer’s.',
+    mvRefused_MV042: 'Only {have} on the road to receive {want}.',
+    mvRefused_MV043: 'What arrived does not go back: record the divergence.',
   },
 
   pt: {
@@ -269,6 +282,7 @@ export const movementMessages = {
 
     mvRefused_MV001: 'Nenhum usuário nesta sessão: entre pelo login.',
     mvRefused_MV002: 'Um movimento não pode ser datado antes do último desta unidade ({last}): use uma correção.',
+    mvRefused_MV003: 'Um movimento precisa fechar por modelo.',
     mvRefused_MV010: 'Uma remessa sai da matriz.',
     mvRefused_MV011: 'Remessa #{transfers_id} não encontrada.',
     mvRefused_MV012: 'A remessa #{transfers_id} não foi enviada: está {status}.',
@@ -284,6 +298,18 @@ export const movementMessages = {
     mvRefused_MV023: 'A moto está em outra loja.',
     mvRefused_MV024: 'A moto está com {claim} e não volta à bancada.',
     mvRefused_MV025: 'A moto não está no estoque para voltar à bancada: está {state}.',
+    mvRefused_MV030: 'Linha da compra não encontrada.',
+    mvRefused_MV031: 'O pedido é de outra loja.',
+    mvRefused_MV032: 'A linha de uma remessa chega na loja; não é recebida como compra.',
+    mvRefused_MV033: 'O pedido está cancelado.',
+    mvRefused_MV034: 'O total recebido não pode ser negativo.',
+    mvRefused_MV035: '{numbers} números para {units} unidades novas.',
+    mvRefused_MV036: 'O número {serial_number} é de outra unidade.',
+    mvRefused_MV037: 'Só {free} de {want} podem voltar: as outras já são alguma coisa.',
+    mvRefused_MV040: 'A remessa é para outra loja.',
+    mvRefused_MV041: 'Esta linha não é da remessa.',
+    mvRefused_MV042: 'Há {have} na estrada para receber {want}.',
+    mvRefused_MV043: 'O que chegou não volta: registre a divergência.',
   },
 }
 

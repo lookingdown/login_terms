@@ -356,6 +356,229 @@ CREATE FUNCTION public.movement_back_to_bench(p_serials_id int4, p_assembly_id i
     SELECT movement_assembly_state(p_serials_id, p_assembly_id, 'validating')
 $$;
 
+-- Events 1 and 2, received and the receipt corrected down: a supplier's delivery line, to its new total p_total.
+-- Received: (p·p) → (L·L·validating) for each unit it mints, (L·L·available) for counted goods; p is the order's
+-- supplier, or the books when the order names none. Corrected down: the opposite, of units that are nothing yet (no
+-- number, no assembly job, nothing holding them, never sold, still where the receipt put them), the newest first.
+-- p_numbers: [{serial_number, observations}] for the new units, in order; the rest are minted without a number.
+-- The line's qty_received follows the total here, under the line's lock.
+CREATE FUNCTION public.movement_receive(p_line int8, p_total int4, p_numbers jsonb DEFAULT '[]') RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user   int4 := mv_user();   -- an empty session is refused before anything else
+    v_line   record;
+    v_here   int4;
+    v_from   jsonb;
+    v_delta  int4;
+    v_legs   jsonb := '[]';
+    v_units  int4[] := '{}';
+    v_unit   int4;
+    v_number text;
+    v_taken  int4;
+    v_have   int4;
+    v_facts  jsonb := jsonb_build_object('purchase_items_id', p_line);
+BEGIN
+    SELECT pi.id, pi.variants_id, pi.qty_received::int4 AS qty_received, p.id AS purchases_id, p.location_id,
+           p.suppliers_id, p.status, i.serial, i.sellable
+      INTO v_line
+      FROM purchase_items pi
+      JOIN purchases p ON p.id = pi.purchases_id
+      JOIN variants v ON v.id = pi.variants_id
+      JOIN items i ON i.id = v.items_id
+     WHERE pi.id = p_line
+       FOR UPDATE OF pi;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV030', 'Purchase line not found.', v_facts);
+    END IF;
+    IF EXISTS (SELECT 1 FROM transfers WHERE shop_purchases_id = v_line.purchases_id) THEN
+        PERFORM mv_refuse('MV032', 'A transfer''s line arrives; it is not received.', v_facts);
+    END IF;
+    IF v_line.location_id IS DISTINCT FROM app_location() THEN
+        PERFORM mv_refuse('MV031', 'The order is another location''s.', v_facts || jsonb_build_object('location_id', v_line.location_id));
+    END IF;
+    IF v_line.status = 'cancelled' THEN
+        PERFORM mv_refuse('MV033', 'The order is cancelled.', v_facts);
+    END IF;
+    IF NOT v_line.sellable THEN
+        PERFORM mv_refuse('MV015', 'Materials do not move through the ledger.', v_facts || jsonb_build_object('variants_id', v_line.variants_id));
+    END IF;
+    IF p_total < 0 THEN
+        PERFORM mv_refuse('MV034', 'A received total cannot be below zero.', v_facts || jsonb_build_object('total', p_total));
+    END IF;
+
+    v_here := v_line.location_id;
+    v_from := CASE WHEN v_line.suppliers_id IS NULL THEN jsonb_build_object('state', 'available')
+                   ELSE jsonb_build_object('at_supplier_id', v_line.suppliers_id, 'owner_supplier_id', v_line.suppliers_id,
+                                           'state', 'available') END;
+    v_delta := p_total - v_line.qty_received;
+    IF v_delta = 0 THEN
+        RETURN jsonb_build_object('received', 0, 'units', '[]'::jsonb);
+    END IF;
+
+    IF v_line.serial AND v_delta > 0 THEN
+        IF jsonb_array_length(p_numbers) > v_delta THEN
+            PERFORM mv_refuse('MV035', format('%s numbers for %s new units.', jsonb_array_length(p_numbers), v_delta),
+                              v_facts || jsonb_build_object('numbers', jsonb_array_length(p_numbers), 'units', v_delta));
+        END IF;
+        FOR i IN 1..v_delta LOOP
+            v_number := NULLIF(trim(p_numbers -> (i - 1) ->> 'serial_number'), '');
+            IF v_number IS NOT NULL THEN
+                SELECT id INTO v_taken FROM serials WHERE serial_number = v_number COLLATE public.ci_ai;
+                IF FOUND THEN
+                    PERFORM mv_refuse('MV036', 'The number is another unit''s.',
+                                      v_facts || jsonb_build_object('serial_number', v_number, 'serials_id', v_taken));
+                END IF;
+            END IF;
+            INSERT INTO serials (variants_id, serial_number, observations, created_at, purchase_items_id, location_id)
+            VALUES (v_line.variants_id, v_number, NULLIF(trim(p_numbers -> (i - 1) ->> 'observations'), ''),
+                    date_trunc('second', LOCALTIMESTAMP), p_line, v_here)
+            RETURNING id INTO v_unit;
+            v_units := v_units || v_unit;
+            v_legs := v_legs || mv_pair(v_line.variants_id, v_unit, 1, v_from,
+                                        jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'validating'));
+        END LOOP;
+    ELSIF v_line.serial THEN
+        SELECT coalesce(array_agg(free.id), '{}') INTO v_units FROM (
+            SELECT s.id FROM serials s
+             WHERE s.purchase_items_id = p_line AND s.serial_number IS NULL
+               AND NOT EXISTS (SELECT 1 FROM assembly a WHERE a.serials_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM unit_claims c WHERE c.serials_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM sales sa WHERE sa.serials_id = s.id)
+               AND (SELECT m.kind FROM movement_legs l JOIN movements m ON m.id = l.movements_id
+                     WHERE l.serials_id = s.id AND l.qty = 1 ORDER BY l.id DESC LIMIT 1) = 'received'
+             ORDER BY s.id DESC LIMIT -v_delta
+               FOR UPDATE OF s) free;
+        IF cardinality(v_units) < -v_delta THEN
+            PERFORM mv_refuse('MV037', 'Units of the line are something already: correct them first.',
+                              v_facts || jsonb_build_object('free', cardinality(v_units), 'want', -v_delta));
+        END IF;
+        FOREACH v_unit IN ARRAY v_units LOOP
+            v_legs := v_legs || mv_pair(v_line.variants_id, v_unit, 1, mv_cell(mv_unit_leg(v_unit)), v_from);
+        END LOOP;
+    ELSE
+        PERFORM pg_advisory_xact_lock(v_here, v_line.variants_id::int4);
+        IF v_delta < 0 THEN
+            SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+             WHERE variants_id = v_line.variants_id AND state = 'available' AND at_location_id = v_here AND owner_location_id = v_here;
+            IF v_have < -v_delta THEN
+                PERFORM mv_refuse('MV037', format('Only %s in stock to take back %s.', v_have, -v_delta),
+                                  v_facts || jsonb_build_object('free', v_have, 'want', -v_delta));
+            END IF;
+        END IF;
+        v_legs := mv_pair(v_line.variants_id, NULL, abs(v_delta),
+                          CASE WHEN v_delta > 0 THEN v_from
+                               ELSE jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available') END,
+                          CASE WHEN v_delta > 0 THEN jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available')
+                               ELSE v_from END);
+    END IF;
+
+    PERFORM mv_post(CASE WHEN v_delta > 0 THEN 'received' ELSE 'receipt_corrected' END, 'purchase_items', p_line, v_legs);
+    UPDATE purchase_items SET qty_received = p_total WHERE id = p_line;
+    RETURN jsonb_build_object('received', v_delta, 'units', to_jsonb(v_units));
+END $$;
+
+-- Event 6, arrived: (r·A·s) → (B·B·s), a transfer's line received at its destination B, the shop's purchase line
+-- p_line. Named units (p_units: the set the shop has) arrive if they are still on the road; with none named, the
+-- oldest of the line's model on the road arrive, up to the line's new total p_total. Counted goods arrive by
+-- quantity. What arrived does not go back: a shortfall is the divergence the master resolves.
+CREATE FUNCTION public.movement_arrive(p_transfers_id int8, p_line int8, p_total int4, p_units jsonb DEFAULT '[]') RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
+    v_transfer transfers%ROWTYPE;
+    v_line     record;
+    v_on_road  int4[];
+    v_named    int4[];
+    v_arriving int4[] := '{}';
+    v_unit     int4;
+    v_cell     movement_legs%ROWTYPE;
+    v_delta    int4;
+    v_have     int4;
+    v_legs     jsonb := '[]';
+    v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id, 'purchase_items_id', p_line);
+BEGIN
+    SELECT * INTO v_transfer FROM transfers WHERE id = p_transfers_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
+    END IF;
+    IF v_transfer.to_location_id IS DISTINCT FROM app_location() THEN
+        PERFORM mv_refuse('MV040', 'The transfer is addressed to another location.',
+                          v_facts || jsonb_build_object('to_location_id', v_transfer.to_location_id));
+    END IF;
+    SELECT ti.variants_id, pi.qty_received::int4 AS qty_received, i.serial
+      INTO v_line
+      FROM transfer_items ti
+      JOIN purchase_items pi ON pi.id = ti.shop_purchase_items_id
+      JOIN variants v ON v.id = ti.variants_id
+      JOIN items i ON i.id = v.items_id
+     WHERE ti.transfers_id = p_transfers_id AND ti.shop_purchase_items_id = p_line
+       FOR UPDATE OF pi;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV041', 'The line is not this transfer''s.', v_facts);
+    END IF;
+
+    IF v_line.serial THEN
+        -- the line's model on this road, by model and not by delivery line (a swapped chassis may be another
+        -- delivery's), locked in id order
+        SELECT coalesce(array_agg(u.serials_id ORDER BY u.serials_id), '{}') INTO v_on_road
+          FROM (SELECT DISTINCT ON (l.serials_id) l.serials_id, l.at_transfer_id
+                  FROM movement_legs l
+                 WHERE l.variants_id = v_line.variants_id AND l.qty = 1
+                   AND l.serials_id IN (SELECT r.serials_id FROM movement_legs r
+                                         WHERE r.at_transfer_id = p_transfers_id AND r.qty = 1 AND r.serials_id IS NOT NULL)
+                 ORDER BY l.serials_id, l.id DESC) u
+         WHERE u.at_transfer_id = p_transfers_id;
+        PERFORM 1 FROM serials WHERE id = ANY (v_on_road) ORDER BY id FOR UPDATE;
+        v_named := ARRAY(SELECT jsonb_array_elements_text(p_units)::int4);
+        IF cardinality(v_named) > 0 THEN
+            v_arriving := ARRAY(SELECT u FROM unnest(v_on_road) u WHERE u = ANY (v_named) ORDER BY u);
+        ELSE
+            v_delta := p_total - v_line.qty_received;
+            IF v_delta < 0 THEN
+                PERFORM mv_refuse('MV043', 'What arrived does not go back: record the divergence.', v_facts);
+            END IF;
+            IF v_delta > cardinality(v_on_road) THEN
+                PERFORM mv_refuse('MV042', format('Only %s on the road to receive %s.', cardinality(v_on_road), v_delta),
+                                  v_facts || jsonb_build_object('have', cardinality(v_on_road), 'want', v_delta));
+            END IF;
+            v_arriving := v_on_road[1:v_delta];
+        END IF;
+        v_delta := cardinality(v_arriving);
+        FOREACH v_unit IN ARRAY v_arriving LOOP
+            v_cell := mv_unit_leg(v_unit);
+            v_legs := v_legs || mv_pair(v_line.variants_id, v_unit, 1, mv_cell(v_cell),
+                                        jsonb_build_object('at_location_id', v_transfer.to_location_id,
+                                                           'owner_location_id', v_transfer.to_location_id, 'state', v_cell.state));
+        END LOOP;
+    ELSE
+        v_delta := p_total - v_line.qty_received;
+        IF v_delta < 0 THEN
+            PERFORM mv_refuse('MV043', 'What arrived does not go back: record the divergence.', v_facts);
+        END IF;
+        PERFORM pg_advisory_xact_lock(0, v_line.variants_id::int4);                         -- the road first, as 009
+        PERFORM pg_advisory_xact_lock(v_transfer.to_location_id, v_line.variants_id::int4);
+        SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+         WHERE variants_id = v_line.variants_id AND at_transfer_id = p_transfers_id AND state = 'available';
+        IF v_delta > v_have THEN
+            PERFORM mv_refuse('MV042', format('Only %s on the road to receive %s.', v_have, v_delta),
+                              v_facts || jsonb_build_object('have', v_have, 'want', v_delta));
+        END IF;
+        IF v_delta > 0 THEN
+            v_legs := mv_pair(v_line.variants_id, NULL, v_delta,
+                              jsonb_build_object('at_transfer_id', p_transfers_id, 'owner_location_id', v_transfer.location_id, 'state', 'available'),
+                              jsonb_build_object('at_location_id', v_transfer.to_location_id,
+                                                 'owner_location_id', v_transfer.to_location_id, 'state', 'available'));
+        END IF;
+    END IF;
+
+    IF v_delta > 0 THEN
+        PERFORM mv_post('arrived', 'transfers', p_transfers_id, v_legs);
+        UPDATE purchase_items SET qty_received = qty_received + v_delta WHERE id = p_line;
+    END IF;
+    RETURN jsonb_build_object('arrived', v_delta, 'units', to_jsonb(v_arriving),
+                              'on_road', (SELECT COALESCE(SUM(qty), 0) FROM positions WHERE at_transfer_id = p_transfers_id));
+END $$;
+
 -- The unit's position on the layer: where, whose, its state and since when.
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
@@ -461,7 +684,8 @@ CREATE VIEW public.movement_check_balance AS
 SELECT movements_id, variants_id, serials_id, SUM(qty) AS net
   FROM movement_legs GROUP BY movements_id, variants_id, serials_id HAVING SUM(qty) <> 0;
 
--- A unit is one chain: each −1 leaves the cell the unit's previous +1 put it in (the first leaves the books).
+-- A unit is one chain: each −1 leaves the cell the unit's previous +1 put it in. The first comes from outside: the
+-- books (the opening), its supplier (a receipt) or a customer (a trade-in); never from a location or a road.
 CREATE VIEW public.movement_check_chain AS
 SELECT o.id AS leg_id, o.serials_id, prev.id AS previous_leg_id
   FROM movement_legs o
@@ -470,7 +694,7 @@ SELECT o.id AS leg_id, o.serials_id, prev.id AS previous_leg_id
                       ORDER BY i.id DESC LIMIT 1) prev ON true
  WHERE o.serials_id IS NOT NULL AND o.qty = -1
    AND CASE WHEN prev.id IS NULL
-            THEN num_nonnulls(o.at_location_id, o.at_transfer_id, o.at_customer_id, o.at_supplier_id) > 0
+            THEN num_nonnulls(o.at_location_id, o.at_transfer_id) > 0
             ELSE (o.at_location_id, o.at_transfer_id, o.at_customer_id, o.at_supplier_id,
                   o.owner_location_id, o.owner_customer_id, o.owner_supplier_id, o.state)
                  IS DISTINCT FROM
@@ -547,7 +771,9 @@ GRANT SELECT ON public.movements, public.movement_legs, public.positions, public
       public.movement_check_balance, public.movement_check_chain, public.movement_check_positions,
       public.movement_check_serial_mix, public.movement_check_roads, public.unit_claims TO app_staff;
 REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8),
-       public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8) FROM PUBLIC;
+       public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
+       public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
-GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8) TO app_staff;
+GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
+      public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb) TO app_staff;
