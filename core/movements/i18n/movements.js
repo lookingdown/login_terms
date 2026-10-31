@@ -12,7 +12,8 @@
  *   t('message.mvRefused_' + error.code, refusalParams(t, error.facts))
  *
  * A key is a prefix and an English word: unitWord_<word>, mvKind_<kind>, planKind_<kind>, unitState_<state>,
- * claim_<kind>, servicePhase_<phase>, place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>.
+ * claim_<kind>, servicePhase_<phase>, trail_<step>, trailSub_<key>, place_<kind>, refType_<type>,
+ * conflict_<key>, mvRefused_<code>.
  * A new locale is a third block with the same keys.
  */
 
@@ -40,6 +41,17 @@ export const movementMessages = {
     servicePhase_received: 'Received in the workshop',
     servicePhase_in_work: 'Being worked on',
     servicePhase_finished: 'Finished in the workshop',
+
+    trail_supplier: 'Supplier',
+    trail_central: 'Central stock',
+    trail_assembly: 'Assembly',
+    trail_shop: 'Shop',
+    trail_customer: 'Customer',
+    trailSub_on_bench: 'on the bench',
+    trailSub_waiting_assembly: 'waiting for assembly',
+    trailSub_earmarked: 'earmarked for {name}',
+    trailSub_waiting_shop: 'waiting for the master to choose the shop',
+    trailSub_for_sale: 'for sale',
 
     unitState_validating: 'on the bench',
     unitState_available: 'available',
@@ -150,6 +162,17 @@ export const movementMessages = {
     servicePhase_received: 'Recebida na oficina',
     servicePhase_in_work: 'Em serviço',
     servicePhase_finished: 'Pronta na oficina',
+
+    trail_supplier: 'Fornecedor',
+    trail_central: 'Estoque Central',
+    trail_assembly: 'Montagem',
+    trail_shop: 'Loja',
+    trail_customer: 'Cliente',
+    trailSub_on_bench: 'na bancada',
+    trailSub_waiting_assembly: 'esperando a montagem',
+    trailSub_earmarked: 'atribuída a {name}',
+    trailSub_waiting_shop: 'esperando o master escolher a loja',
+    trailSub_for_sale: 'à venda',
 
     unitState_validating: 'em montagem',
     unitState_available: 'disponível',

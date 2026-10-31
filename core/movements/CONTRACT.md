@@ -16,6 +16,10 @@ For inventory-master (`php-files/functions.php`) and the four core kernels it re
    it into words, per locale. `i18n/movements.js` holds the layer's words, in en and pt. Keys are English. Names (a
    location's, a customer's) and numbers (a chassis, a remessa) travel as parameters. Places travel as coordinates
    (`location:2`, `road:55`).
+6. **Values travel typed:** ids and quantities as integers, money as numbers, booleans as booleans, moments as
+   `Y-m-d H:i:s`. A unit has one `cost`, chosen by the server, so a screen no longer picks between the landed and the
+   invoice cost (`useCost.js`).
+7. **A screen tells refusals apart by their code, never by their message.**
 
 ## The shapes
 
@@ -41,7 +45,7 @@ For inventory-master (`php-files/functions.php`) and the four core kernels it re
 - `where` is its place for people: a key (`master`, `location`, `road`, `customer`, `supplier`, `books`) and the
   names it needs. The screen shows `t('message.place_' + where.key, where.params)`.
 - A screen that needs them adds document facts beside it:
-  - `purchase`: `purchases_id`, `nf`, `supplier_name`, `arrived`
+  - `purchase`: `purchases_id`, `purchase_items_id`, `nf`, `supplier_name`, `arrived`
   - `cost`: what the unit cost the location it stands at, from its receipt there
   - `price`
   - `customer`: `id` and `name`, when a customer is its place or its owner
@@ -149,10 +153,16 @@ One movement as one location sees it. Movimentações and a model's last moves a
   - `unit`: the Unit, with `purchase`, `cost` and `price`
   - `facts`: `where`, `since`, `entered_stock` (its first stay available at a location), `cost`, `price`,
     `delivered_at` (its `handed_over` movement), `warranty_months` and `warranty_until`
-  - `trail`: the five steps, Fornecedor → Estoque Central → Montagem → Loja → Cliente, read off the line
+  - `trail`: the five steps, read off the line and drawn as a purchase order's road is (`poRoad.js`):
+    `[{key, state, sub}]`.
+    - `key`: `supplier`, `central`, `assembly`, `shop` or `customer`; its words are `trail_<key>`
+    - `state`: `done`, `current` or `todo`
+    - `sub`: what the current step waits for, as a key and its parameters: `on_bench`, `waiting_assembly`,
+      `earmarked` (with the shop's name), `waiting_shop` or `for_sale`; its words are `trailSub_<key>`
   - `line`: the cube's dots for the unit, facts then plans
-  - `events`: the story. Each fact on the line is an event, titled by its kind. The documents' chapters sit beside
-    them in time order: the purchase, the assembly job's stages, a rental's km, the service orders.
+  - `events`: the story, `[{at, kind, ref, params}]`. Each fact on the line is an event, titled `mvKind_<kind>`.
+    The documents' chapters sit beside them in time order, titled `story_<kind>`: the purchase, the assembly job's
+    stages, a rental out and back with its km, the service orders. Their words come with `unitTrajectory`'s code.
 
 ## The readers
 
@@ -193,6 +203,32 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | `swapTransferUnit` | `id`, `recorded`, `actual` | the correction's note on the shop's order | `movementSwap`, a correction dated at the dispatch | as today | another SKU; the real one not free at the origin |
 | `resolveTransfer` | `id`, `note` | the shop's receipt check | none: it moves nothing | as today | — |
 | `countActions` | as today | the count | `countOpen` reads positions; `countClose` calls `movementCountClose` | as today | — |
+
+### Outside inventory-master
+
+- **The workshop's monthly close** (`BillingClose.vue`, `core/workshopClose.php`) bills each service order to the
+  bike's store of origin, which it reads from `serials.location_id`. That column goes at step C. On the layer, the
+  store of origin is the location that sold the bike, from its live sale line. For a bike never sold, it is the
+  location that owns it.
+
+## The Vue side
+
+What the screens and composables read today, and where it is in the new shapes. Read from `DistributeStock.vue`,
+`useDistribute.js`, `useCost.js`, `poRoad.js`, `usePasswordPrompt.js`, `CountsView.vue` and `BillingClose.vue`.
+
+| today | becomes | where |
+|---|---|---|
+| a unit's `earmark_location_id` and `earmark` (its name) | `earmark.location_id` and `earmark.name` | the delivery's unit picker |
+| `held[].purchase_items_id`, a draft's units grouped by line | `held[].purchase.purchase_items_id` | `openDraft` |
+| `dispatchTransfer({id, expected})`, a date | `{id, expected_at}`, a date and a time, required: a `datetime-local` field, the expected arrival | `dispatch`, DistributeStock's "Ship date" |
+| `parseInt(remaining)`, `!!parseInt(serial_required)`, `unitCost(row)` | typed values and one `cost`. The conversions stay harmless; new screens need none | useDistribute, useCost |
+| `toast.showError(e.message)` | with a `code`: `t('message.mvRefused_' + e.code, refusalParams(t, e.facts))`. The shared API client keeps `code` and `facts` on the error it throws | every screen |
+| `isPasswordError(e)` compares the messages 'Invalid password' and 'Invalid supervisor password' | a code for each, from the server, compared instead | usePasswordPrompt |
+| a unit's state, `serialState()`'s key and label | `word`, shown as `t('message.unitWord_' + word)` | every unit list |
+| the remessa's carrier, stored as words ('Equipe da rede', 'Transportadora · …') and parsed back by its first word | `carrier: {kind: 'team' \| 'company', name}`, when dispatch is rewritten | useDistribute |
+
+The steps strips (StepsStrip with `poRoad.js`) are the pattern for a unit's trail and a remessa's road: keys, each
+step `done`, `current` or `todo`.
 
 ## The explained differences
 
