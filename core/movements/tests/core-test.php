@@ -208,3 +208,14 @@ try {
 }
 $pdo->rollBack();
 check('undone: bike 501 on its order again, not sold', $word() === 'reserved');
+
+// a dot written off through its action (cube.php), in a transaction undone after
+$pdo->beginTransaction();
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$pdo->exec("INSERT INTO approvals (id, action, ref_type, ref_id, requested_by, approved_by, approved_via, reason, location_id) OVERRIDING SYSTEM VALUE
+            VALUES (90, 'baixa_moto', 'serials', 504, 1, 1, 'self', 'total loss', 1)");
+$pdo->exec("SET LOCAL session_replication_role = origin");
+$dot = cubeDot($pdo, ['unit' => 504], 'written_off', ['approval' => 90, 'note' => 'total loss']);
+check('a dot written off by its action: written off where it stands', $dot['state'] === 'written_off' && $dot['why'] === 'written_off' && unitRows($pdo, [504])[0]['word'] === 'written_off', $dot);
+$pdo->rollBack();
+check('undone: bike 504 on the bench again', cubeDot($pdo, ['unit' => 504])['state'] === 'validating');

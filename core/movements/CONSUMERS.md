@@ -137,6 +137,8 @@ cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);    // advanced: the
 |---|---|---|
 | `built` | `assembly` | MV020 the unit is unknown; MV021 it is not the job's; MV022 it is not validating where its owner stands; MV023 it is another shop's |
 | `back_to_bench` | `assembly` | MV020, MV021 and MV023 as `built`; MV025 it is not available where its owner stands; MV024 an order, a remessa draft or the fleet holds it |
+| `written_off` | `approval`, `note` | MV082 not the master; MV081 not in stock or on the bench where its owner stands; MV055 something holds it; MV080 no baixa_moto approval for this unit |
+| `to_provider` | `approval`; `supplier`, `note` | as `written_off`; MV083 no supplier named and none it was bought from |
 
 The actions to come, each on the same pattern (plan §2, code §4). The needs are a proposal:
 
@@ -146,8 +148,6 @@ The actions to come, each on the same pattern (plan §2, code §4). The needs ar
 | `rented`, `rental_back` | 16, 17 | `booking` | |
 | `loaned`, `loan_back` | 16, 17 | `loan` | |
 | `workshop_in`, `workshop_out` | 18, 19 | `service_order` | F |
-| `written_off` | 20 | `approval` | |
-| `to_provider` | 21 | `supplier`, `approval` | |
 | `corrected` | 24 | `place`, `owner`, `state`, `note` | |
 
 Adding one takes three pieces: its database function on `movement_dispatch`'s pattern, its function in

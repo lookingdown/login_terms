@@ -215,3 +215,66 @@ function movementSwap(PDO $pdo, int $transferId, int $namedSerialId, int $realSe
     return movementCall($pdo, 'movement_swap', [[$transferId, 'bigint'], [$namedSerialId, 'integer'], [$realSerialId, 'integer'], [$note, 'text']]);
 }
 
+/** A remessa draft holds a unit at its origin: available, where its owner stands, held by nothing else. @return array{held: bool} */
+function claimHold(PDO $pdo, int $transferId, int $serialId): array
+{
+    return movementCall($pdo, 'claim_hold', [[$transferId, 'bigint'], [$serialId, 'integer']]);
+}
+
+/** A draft lets a unit go, or every unit it holds when $serialId is null. @return array{released: int} */
+function claimRelease(PDO $pdo, int $transferId, ?int $serialId = null): array
+{
+    return movementCall($pdo, 'claim_release', [[$transferId, 'bigint'], [$serialId, 'integer']]);
+}
+
+/**
+ * The attach: an order line takes its unit, available where the order is and held by nothing else. On an order paid
+ * in full the sale is posted at once.
+ *
+ * @return array{attached: bool, sold: bool}
+ */
+function claimSale(PDO $pdo, int $saleId, int $serialId): array
+{
+    return movementCall($pdo, 'claim_sale', [[$saleId, 'bigint'], [$serialId, 'integer']]);
+}
+
+/** An order line lets its unit go, while it is not sold. @return array{released: bool, serials_id?: int} */
+function claimSaleRelease(PDO $pdo, int $saleId): array
+{
+    return movementCall($pdo, 'claim_sale_release', [[$saleId, 'bigint']]);
+}
+
+/** The rental fleet takes a unit for one of its resources. @return array{held: bool} */
+function claimFleet(PDO $pdo, int $resourceId, int $serialId): array
+{
+    return movementCall($pdo, 'claim_fleet', [[$resourceId, 'bigint'], [$serialId, 'integer']]);
+}
+
+/** The fleet lets a resource's unit go, unless it is out with a customer. @return array{released: bool, serials_id?: int} */
+function claimFleetRelease(PDO $pdo, int $resourceId): array
+{
+    return movementCall($pdo, 'claim_fleet_release', [[$resourceId, 'bigint']]);
+}
+
+/**
+ * Event 20, written off (theft, a total loss) where it stands. The master's, with the baixa_moto approval for this
+ * unit; a unit in stock or on the bench, held by nothing.
+ *
+ * @return array{state: string}
+ */
+function movementWriteOff(PDO $pdo, int $serialId, int $approvalId, ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_write_off', [[$serialId, 'integer'], [$approvalId, 'bigint'], [$note, 'text']]);
+}
+
+/**
+ * Event 21, returned to the provider: to $supplierId, or else to the supplier it was bought from. As a write-off:
+ * the master's, the approval, a unit in stock or on the bench, held by nothing.
+ *
+ * @return array{state: string, suppliers_id: int}
+ */
+function movementToProvider(PDO $pdo, int $serialId, int $approvalId, ?int $supplierId = null, ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_to_provider', [[$serialId, 'integer'], [$approvalId, 'bigint'], [$supplierId, 'bigint'], [$note, 'text']]);
+}
+

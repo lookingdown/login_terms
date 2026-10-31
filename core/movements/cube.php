@@ -71,6 +71,9 @@ function cubeActions(): array
     return [
         'built'         => [['assembly'], fn (PDO $pdo, int $unit, array $with) => movementBuilt($pdo, $unit, (int) $with['assembly'])],
         'back_to_bench' => [['assembly'], fn (PDO $pdo, int $unit, array $with) => movementBackToBench($pdo, $unit, (int) $with['assembly'])],
+        'written_off'   => [['approval'], fn (PDO $pdo, int $unit, array $with) => movementWriteOff($pdo, $unit, (int) $with['approval'], $with['note'] ?? null)],
+        'to_provider'   => [['approval'], fn (PDO $pdo, int $unit, array $with) => movementToProvider($pdo, $unit, (int) $with['approval'],
+                                isset($with['supplier']) ? (int) $with['supplier'] : null, $with['note'] ?? null)],
     ];
 }
 

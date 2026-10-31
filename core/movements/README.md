@@ -14,7 +14,7 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 | file | what | step |
 |---|---|---|
 | `movements.php` | the one require: `require_once '/var/sys/core/movements/movements.php';` | |
-| `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()`, `movementBuilt()`, `movementBackToBench()`, `movementReceive()`, `movementArrive()`, `movementSell()`, `movementHandOver()`, `movementUnsell()`, `movementReturn()`, `movementNotSent()`, `movementLost()`, `movementSwap()` | C |
+| `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()`, `movementBuilt()`, `movementBackToBench()`, `movementReceive()`, `movementArrive()`, `movementSell()`, `movementHandOver()`, `movementUnsell()`, `movementReturn()`, `movementNotSent()`, `movementLost()`, `movementSwap()`, `movementWriteOff()`, `movementToProvider()`; the claims, `claimHold()`, `claimRelease()`, `claimSale()` (the attach), `claimSaleRelease()`, `claimFleet()`, `claimFleetRelease()` | C |
 | `positions.php` | the reading side at now: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | C |
 | `cube.php` | the cube's door (`CONSUMERS.md`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, `cubeConflicts()` | B |
 | `units.php` | the kernel of a unit (`CONTRACT.md`): `unitWord()`, `servicePhase()`, `unitRows()` (the Unit), `stockUnitsList()` (a location's units), `placeWhere()` | C |
@@ -22,19 +22,20 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 | `trajectory.php` | `unitTrajectory()`: a unit's whole life, the line, its facts, the trail and the story | C |
 | `i18n/movements.js` | the layer's words, en and pt, for every module's i18n: the units' words, the movement kinds, the places, the refusals | C |
 | `CONTRACT.md` | who reads and who writes: inventory-master's functions and the four core kernels, mapped to the layer, with the shapes in and out and the differences from today, explained | C |
-| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, the posting primitive `mv_post()` with `mv_cell()`, `mv_pair()` and `mv_unit_leg()`, `unit_claims` and `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, `movement_receive()`, `movement_arrive()`, the sale path (`movement_sell()`, `movement_hand_over()`, `movement_unsell()`, `movement_return()`, with `mv_order()`, `mv_order_line()`, `mv_line_sold()`, `mv_line_out()` and the cost, `mv_cost()`), the remessa's corrections (`movement_not_sent()`, `movement_lost()` through `mv_take_off()`, `movement_swap()`, and `mv_on_road()`), the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
+| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, the posting primitive `mv_post()` with `mv_cell()`, `mv_pair()` and `mv_unit_leg()`, `unit_claims` and `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, `movement_receive()`, `movement_arrive()`, the sale path (`movement_sell()`, `movement_hand_over()`, `movement_unsell()`, `movement_return()`, with `mv_order()`, `mv_order_line()`, `mv_line_sold()`, `mv_line_out()` and the cost, `mv_cost()`), the remessa's corrections (`movement_not_sent()`, `movement_lost()` through `mv_take_off()`, `movement_swap()`, and `mv_on_road()`), the claims (`claim_hold()`, `claim_release()`, `claim_sale()`, `claim_sale_release()`, `claim_fleet()`, `claim_fleet_release()` over `mv_claimable()`), the baixa (`movement_write_off()`, `movement_to_provider()` through `mv_baixa()`), the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
 | `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `unit_waypoints`, `unit_waypoint_conflicts`, `cube_dots()` (one parameter per axis) | B |
 | `sql/readers.sql` | what the kernels read in one statement: `movement_rows(location)`, the journal as one location sees it | C |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
 | `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
 | `tests/dispatch-test.sql` | 18 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards: the dispatch, the reads, the health checks, each refusal of built and back to the bench, and a movement that does not balance | |
 | `tests/cube-test.sql` | 14 cases on the time axis: the stays, a cut along each axis in both clocks, an instant, the encounters, the road's forward end, and the rules that keep one place at a time | |
-| `tests/core-test.php` | 48 cases through PHP: the door, the readers, the cube's every angle, its dots and its actions, the kernels, and a receipt, an arrival and a sale undone after | |
+| `tests/core-test.php` | 50 cases through PHP: the door, the readers, the cube's every angle, its dots and its actions, the kernels, and a receipt, an arrival, a sale and a write-off undone after | |
 | `tests/receive-test.sql` | 15 cases: a supplier's delivery received, its numbers checked, corrected down; a remessa arriving at its shop; the health checks. Run after the PHP: it changes what the others read | |
 | `tests/sale-test.sql` | 18 cases: an order paid and sold, handed over, returned; counted goods sold, returned, undone; each refusal; the health checks. Run after receive-test.sql | |
 | `tests/road-test.sql` | 14 cases: a remessa dispatched, its chassis swapped, a helmet not sent, one lost on the way, the rest arriving; each refusal; the health checks. Run after sale-test.sql | |
+| `tests/claims-test.sql` | 18 cases: a draft's hold and release, the attach on an unpaid and on a paid order, the fleet's claim, a write-off and a return to the provider; each refusal; the health checks. Run after road-test.sql | |
 
-Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, `php tests/core-test.php path/to/vendor/autoload.php`, `tests/receive-test.sql`, `tests/sale-test.sql`, then `tests/road-test.sql`.
+Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, `php tests/core-test.php path/to/vendor/autoload.php`, `tests/receive-test.sql`, `tests/sale-test.sql`, `tests/road-test.sql`, then `tests/claims-test.sql`.
 
 ## The draft's ERP controls, in the layer
 - **Health checks**, the draft's `v_recon_*`: `movement_check_balance`, `_chain`, `_positions`, `_serial_mix` and `_roads`. Each must answer nothing, and anything found is fixed by posting a movement.
@@ -64,7 +65,7 @@ The legacy statuses in use are sold 78, stock 12, assembly 4 and returned 4. No 
 As the data stands, the opening's guard (code §3.4.1) would refuse: each of its five classes has rows. They are the client's to settle (rule §0.2).
 
 ## Every event function keeps these rules
-`movement_dispatch`, `movement_built`, `movement_back_to_bench`, `movement_receive`, `movement_arrive`, the sale path's four and the remessa's three corrections keep each of them:
+`movement_dispatch`, `movement_built`, `movement_back_to_bench`, `movement_receive`, `movement_arrive`, the sale path's four, the remessa's three corrections, the claims and the baixa keep each of them:
 
 1. It is SECURITY DEFINER, with `SET search_path = public, pg_temp`.
 2. The user comes from the session: `mv_user()` refuses an empty `app.user`.
@@ -88,8 +89,7 @@ These are the names and arguments of code §4, written on `movement_dispatch`'s 
 
 - `movementFlip` (step D, by the master's admin)
 - `movementRentOut` and `movementRentBack`; `movementLoanOut` and `movementLoanBack`
-- `movementWriteOff`; `movementToProvider($pdo, $serialId, $supplierId, …)`; `movementAdjust`; `movementCountClose`; `movementCorrect`; `movementUnitRemove`
-- `claimHold` / `claimRelease` (`transfer_units`); `claimSale` / `claimSaleRelease`, which refuses a unit still in assembly. Assembly's own job-to-unit link isn't a claim. `claimFleet` / `claimFleetRelease`.
+- `movementAdjust`; `movementCountClose`; `movementCorrect`; `movementUnitRemove`
 
 ## No step A (Johan, 2026-10-31)
 Step A defined the read interface on today's tables first, with the rule that every read answers the same before and after. That rule would have rebuilt what is being replaced, so step A goes:
