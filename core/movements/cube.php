@@ -74,6 +74,8 @@ function cubeActions(): array
         'written_off'   => [['approval'], fn (PDO $pdo, int $unit, array $with) => movementWriteOff($pdo, $unit, (int) $with['approval'], $with['note'] ?? null)],
         'to_provider'   => [['approval'], fn (PDO $pdo, int $unit, array $with) => movementToProvider($pdo, $unit, (int) $with['approval'],
                                 isset($with['supplier']) ? (int) $with['supplier'] : null, $with['note'] ?? null)],
+        'flipped'       => [['to'], fn (PDO $pdo, int $unit, array $with) => movementFlip($pdo,
+                                (int) (unitPosition($pdo, $unit)['location_id'] ?? 0), (int) $with['to'], [$unit], [], $with['note'] ?? null)],
     ];
 }
 

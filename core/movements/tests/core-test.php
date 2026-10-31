@@ -219,3 +219,52 @@ $dot = cubeDot($pdo, ['unit' => 504], 'written_off', ['approval' => 90, 'note' =
 check('a dot written off by its action: written off where it stands', $dot['state'] === 'written_off' && $dot['why'] === 'written_off' && unitRows($pdo, [504])[0]['word'] === 'written_off', $dot);
 $pdo->rollBack();
 check('undone: bike 504 on the bench again', cubeDot($pdo, ['unit' => 504])['state'] === 'validating');
+
+// an adjustment, a rental, a loan, a quick transfer and a count (ledger.php, cube.php), in a transaction undone after
+$pdo->beginTransaction();
+$adjusted = movementAdjust($pdo, [['variants_id' => 200, 'qty' => -1]], 'damaged', 'dropped');
+check('an adjustment: one helmet damaged at the master, 2 → 1, one movement', $adjusted['adjusted'] === 1 && is_int($adjusted['movement_id'])
+    && $adjusted['items'] == [['variants_id' => 200, 'before' => 2, 'after' => 1, 'delta' => -1]], $adjusted);
+$row = movementsList($pdo, ['variants_id' => 200], 1)['data'][0];
+check('the journal row carries its reason, and the balance after it', $row['kind'] === 'adjusted' && $row['reason'] === 'damaged' && $row['qty'] === -1
+    && $row['balance'] === 1 && $row['to'] === ['place' => 'location:1', 'owner' => 'location:1', 'state' => 'written_off'], $row);
+try {
+    movementAdjust($pdo, [['variants_id' => 100, 'qty' => 1]], 'found', 'a bike');
+    check('a bike adjusted by quantity is refused', false);
+} catch (MovementRefused $e) {
+    check('a bike adjusted by quantity is refused: through its unit, its model in the facts', $e->sqlState === 'MV110' && $e->facts === ['variants_id' => 100], [$e->sqlState, $e->facts]);
+}
+$word = fn (int $unit) => unitRows($pdo, [$unit])[0]['word'];
+$booking = (int) $pdo->query('SELECT id FROM bookings WHERE resource_id = 1 ORDER BY id LIMIT 1')->fetchColumn();
+$out = movementRentOut($pdo, $booking);
+check('a rental out: bike 502 with its customer, the master\'s still', $out === ['done' => true] && $word(502) === 'rented'
+    && cubeDot($pdo, ['unit' => 502])['place'] === 'customer:7' && cubeDot($pdo, ['unit' => 502])['owner'] === 'location:1', [$out, $word(502)]);
+check('out again is nothing', movementRentOut($pdo, $booking) === ['done' => false]);
+check('back: in the fleet again', movementRentBack($pdo, $booking) === ['done' => true] && $word(502) === 'fleet', $word(502));
+claimFleetRelease($pdo, 1);
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$loan = (int) $pdo->query("INSERT INTO loans (serials_id, borrower_name, due_at, customers_id, location_id)
+                           VALUES (502, 'Cliente Sete', CURRENT_DATE + 7, 7, 1) RETURNING id")->fetchColumn();
+$pdo->exec("SET LOCAL session_replication_role = origin");
+movementLoanOut($pdo, $loan);
+check('a loan out: bike 502 on loan, with its customer', $word(502) === 'loaned' && cubeDot($pdo, ['unit' => 502])['customer'] === 7, $word(502));
+movementLoanBack($pdo, $loan);
+$dot = cubeDot($pdo, ['unit' => 502], 'flipped', ['to' => 2]);
+check('a dot flipped by its action: Prudente\'s at once, standing there, available', $dot['place'] === 'location:2' && $dot['owner'] === 'location:2'
+    && $dot['state'] === 'available' && $dot['why'] === 'flipped' && $word(502) === 'stock', $dot);
+try {
+    movementFlip($pdo, 1, 2, [], [['variants_id' => 200, 'qty' => 5]]);
+    check('more helmets flipped than the master has is refused', false);
+} catch (MovementRefused $e) {
+    check('more helmets flipped than the master has is refused, with what it has', $e->sqlState === 'MV132' && $e->facts['have'] === 1 && $e->facts['want'] === 5, [$e->sqlState, $e->facts]);
+}
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$count = (int) $pdo->query("INSERT INTO stock_counts (location_id) VALUES (1) RETURNING id")->fetchColumn();
+$pdo->exec("INSERT INTO stock_count_lines (counts_id, kind, variants_id, counted_qty, location_id) VALUES ({$count}, 'part', 200, 3, 1)");
+$pdo->exec("SET LOCAL session_replication_role = origin");
+$closed = movementCountClose($pdo, $count);
+check('a count closed: the master\'s helmets set to the 3 counted, 1 → 3', $closed['adjusted'] === 1
+    && $closed['items'] == [['variants_id' => 200, 'before' => 1, 'after' => 3, 'delta' => 2]], $closed);
+$pdo->rollBack();
+check('undone: bike 502 in the fleet at the master, and two helmets', $word(502) === 'fleet'
+    && (int) $pdo->query('SELECT qty FROM stock_on_hand WHERE location_id = 1 AND variants_id = 200')->fetchColumn() === 2);

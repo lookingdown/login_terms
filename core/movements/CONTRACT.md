@@ -116,10 +116,12 @@ One movement as one location sees it. Movimentações and a model's last moves a
     'to' => ['place' => 'location:1', 'state' => 'available'],
     'names' => ['location:1' => 'Matriz'],
     'ref' => ['type' => 'assembly', 'id' => 81],
-    'note' => null, 'who' => 'Johan',
+    'note' => null, 'reason' => null, 'who' => 'Johan',
 ]
 ```
 
+- `reason` is the movement's key, its words `reason_<key>`: an adjustment's `found`, `damaged`, `loss`, `expired`,
+  `count` or `other` (the house's words, messages.js), or who bears a loss on the road, `origin` or `carrier`.
 - When the list is one model at one location, each row carries `balance`: the location's own stock after it.
 - A document's process lines come in the same row, with `qty` 0 and `from` and `to` as their stages: `kind`
   `assembly` for an assembly job's stage, `service` for a service order's state.
@@ -193,7 +195,7 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | function | takes (as today unless said) | its documents (as today) | the layer | answers | refused when |
 |---|---|---|---|---|---|
 | `receivePurchaseOrder` | `id`; `items: [{purchase_item_id, qty_received, serials \| units}]`: the line's new total, the numbers typed, or a remessa's arrived units; the receipt check | the order's status and date, the check, the landed costs; the remessa `received` once its arrival answers `on_road` 0. A line's `qty_received` is the layer's: it follows the total under the line's lock | a supplier's line: `movementReceive`, which mints each new unit on the bench. A remessa's line: `movementArrive` | `getPurchaseOrder` | MV030–MV037: another location's order, a remessa's line, a cancelled order, a number already a unit's, more numbers than units, a correction below units that are something already (numbered, on a job, held, sold). MV040–MV043: another location's remessa, a line not its own, more than is on the road, a lower total |
-| `adjustStock`, `adjustStockBatch` | one line (`variants_id` with `qty_new` or `qty_delta`) or `items`; `reason`, `note` | — | `movementAdjust`: one movement, one leg pair per line | `{adjusted, ref: ADJ-YYYY-<movement>, timestamp, user_name, reason, note, items}` | a serial-tracked model (the screen points to the unit); going below zero |
+| `adjustStock`, `adjustStockBatch` | one line (`variants_id` with `qty_new` or `qty_delta`) or `items`; `reason`, `note` | — | `movementAdjust($pdo, $lines, $reason, $note)`: one movement, one leg pair per model. A line is `['variants_id', 'qty']` for `qty_delta`, or `['variants_id', 'balance']` for `qty_new`, the difference worked out under the model's lock. A gain comes from the books; a loss is written off where it stands | `{adjusted, ref: ADJ-YYYY-<movement>, timestamp, user_name, reason, note, items}`, the layer answering `movement_id` and each line's `before`, `after`, `delta` | MV110 a serial-tracked model (the screen points to the unit); MV114 going below zero; MV111 no reason; MV112 no note; MV115 found as a loss, or damaged, loss or expired as a gain; MV113 an unknown model; MV015 a material; MV116 a balance given twice |
 | `writeOffSerial` | `serial_id`, `kind` (theft, total loss, returned to the supplier), `note`, the approval | the note on the observations; the open assembly job cancelled | `cubeDot($unit, 'written_off')`, or `'to_provider'` for a return | Unit, `approval_id` | not standing where its owner stands; held by something; no approval |
 | `updateSerial` | `id`, `serial_number`, `observations`; the status goes | the number and observations (`serialChange`); the job's copy of the number | a supervisor's correction: `cubeDot($unit, 'corrected', {place, owner, state, note})` | Unit | — |
 | `deleteSerial` | `id`, the password | — | `movementUnitRemove` | `{id, deleted}` | anything beyond its receipt; named by a sale, a job, a service order or an NF-e |
@@ -201,12 +203,25 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | `cancelTransferDraft` | `id` | the remessa cancelled | `claimRelease` | `{id, discarded}` | — |
 | `dispatchTransfer` | `id`, `expected_at` (the expected arrival, a date and a time: a same-day delivery has its hour) | `transfers.expected_at`; the shop's order (its `expected`, the date) and its lines; the remessa sent | `movementDispatch` | as today, with `legs` | MV010–MV018: MV018 without an expected arrival |
 | `relocateStock` | as today, with `expected_at` | the remessa from the shop; the destination's order | `movementDispatch` | as today | as dispatch |
-| `takeOffTransfer` | `id`, `line_id`, `serials` or `qty`, `lost`, `bears` | the lines and the shop's order settled | `movementNotSent`, or `movementLost` (who bears it, in the note) | as today | not on that road; not the master |
+| `takeOffTransfer` | `id`, `line_id`, `serials` or `qty`, `lost`, `bears` | the lines and the shop's order settled | `movementNotSent`, or `movementLost` (who bears it, as the movement's reason) | as today | not on that road; not the master |
 | `swapTransferUnit` | `id`, `recorded`, `actual` | the correction's note on the shop's order | `movementSwap`, a correction dated at the dispatch | as today | another SKU; the real one not free at the origin |
 | `resolveTransfer` | `id`, `note` | the shop's receipt check | none: it moves nothing | as today | — |
-| `countActions` | as today | the count | `countOpen` reads positions; `countClose` calls `movementCountClose` | as today | — |
+| `countActions` | as today | the count; at close, `fechado` and `parts_adjusted` from the answer's `adjusted` | `countOpen` reads positions; `countClose` calls `movementCountClose`: each counted part set to what was counted (several lines of a model add up), one movement, reason `count`. Materials, units and lines not counted are left alone | as today | MV120 an unknown count; MV121 not open; MV093 another location's |
+| **new:** Transferência rápida | `from`, `to`, `serials`, `counted` (`[{variants_id, qty}]`), `note` | — | `movementFlip`: (A·A·available) → (B·B·available) at once, no road; a unit by `cubeDot($unit, 'flipped', ['to' => B])` | `{movement_id, units, lines}` | MV130 not the master's admin or superadmin (`app_user_admin()` tells the screen whether to show itself); MV131 not from one active location to another; MV091, MV055 a unit not available at A or held; MV132 fewer counted goods at A; MV073 a bike model by quantity; MV133 nothing |
 
 ### Outside inventory-master
+
+- **The rentals** (`desk.php`'s `rentalPickup` and `rentalReturn`): the pickup calls `movementRentOut($pdo, $bookingId)`
+  after it marks the booking `in_use`, the return `movementRentBack` after `completed`. The booking names the bike
+  (its fleet resource's) and the customer; the bike stays its location's, at `customer:<id>`, and the fleet keeps
+  holding it. Out is refused for a booking not to come or under way (MV141), a booking without a bike (MV142), a bike
+  not available where it is kept (MV143) or held by something but its own resource (MV055), another location's
+  booking (MV093). Back is refused only when the bike did not go out on it (MV144), whatever the booking's status.
+  Each is once: again answers `{done: false}`.
+- **The loans** (`loans.php`, the loan form): a loan names a customer (`loans.customers_id`, migration 026), picked or
+  created through `core/customerRecord.php`; a loan without one is refused (MV146). `loanOut` and `loanReturn` call
+  `movementLoanOut` and `movementLoanBack`, with the rentals' rules (MV141 for a loan not `preparando` or
+  `com_a_pessoa`). The loans written before the column have none: each needs its customer before it goes out.
 
 - **The workshop's monthly close** (`BillingClose.vue`, `core/workshopClose.php`) bills each service order to the
   bike's store of origin, which it reads from `serials.location_id`. That column goes at step C. On the layer, the

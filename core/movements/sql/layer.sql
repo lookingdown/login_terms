@@ -13,6 +13,10 @@ CREATE TABLE public.transfer_units (
 -- Dispatch refuses a remessa without one (MV018); the shop's order keeps its date in purchases.expected.
 ALTER TABLE public.transfers ADD COLUMN IF NOT EXISTS expected_at timestamp(0);
 
+-- A loan names its customer (code §3.2, migration 026): a bike in someone's hands is with a customer. Null on the
+-- loans written before it; movement_loan_out refuses a loan without one (MV146).
+ALTER TABLE public.loans ADD COLUMN IF NOT EXISTS customers_id int4 REFERENCES public.customers;
+
 -- One row per business event.
 CREATE TABLE public.movements (
     id          int8 GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -32,6 +36,7 @@ CREATE TABLE public.movements (
     ref_id      int8,
     note        varchar(500) COLLATE public.ci_ai,
     corrects_id int8 REFERENCES public.movements,
+    reason      text CHECK (reason ~ '^[a-z_]+$'),   -- a key, i18n reason_<key>: an adjustment's why, who bears a loss
     CHECK (users_id IS NOT NULL OR kind = 'opening'),
     CHECK ((ref_type IS NULL) = (ref_id IS NULL))
 );
@@ -148,14 +153,14 @@ END $$;
 -- makes nothing and loses nothing: MV003). Each leg is an object of p_legs: variants_id, serials_id (null for
 -- counted goods), qty, and its cell's at_*, owner_* and state; a key left out is null.
 CREATE FUNCTION public.mv_post(p_kind text, p_ref_type text, p_ref_id int8, p_legs jsonb, p_note text DEFAULT NULL,
-                               p_occurred_at timestamp DEFAULT NULL, p_corrects_id int8 DEFAULT NULL) RETURNS int8
+                               p_occurred_at timestamp DEFAULT NULL, p_corrects_id int8 DEFAULT NULL, p_reason text DEFAULT NULL) RETURNS int8
     LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
     v_movement int8;
 BEGIN
-    INSERT INTO movements (kind, users_id, ref_type, ref_id, note, occurred_at, corrects_id)
+    INSERT INTO movements (kind, users_id, ref_type, ref_id, note, occurred_at, corrects_id, reason)
     VALUES (p_kind, mv_user(), p_ref_type, p_ref_id, p_note,
-            COALESCE(p_occurred_at, date_trunc('second', LOCALTIMESTAMP)), p_corrects_id)
+            COALESCE(p_occurred_at, date_trunc('second', LOCALTIMESTAMP)), p_corrects_id, p_reason)
     RETURNING id INTO v_movement;
     INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, at_transfer_id, at_customer_id,
                                at_supplier_id, owner_location_id, owner_customer_id, owner_supplier_id, state)
@@ -585,8 +590,8 @@ CREATE FUNCTION public.mv_on_road(p_transfers_id int8) RETURNS int4
 $$;
 
 -- Events 7 and 8, taken off the road: not sent, (r·A·s) → (A·A·s), back at the origin; or lost on the road,
--- (r·A·s) → (r·A·written_off), with who bears it (the origin or the carrier) at the head of the note
--- ('bears=carrier'). A serial-tracked model by its named units, counted goods by quantity. The master's (MV070).
+-- (r·A·s) → (r·A·written_off), with who bears it, the origin or the carrier, as its reason. A serial-tracked model
+-- by its named units, counted goods by quantity. The master's (MV070).
 CREATE FUNCTION public.mv_take_off(p_transfers_id int8, p_variants_id int8, p_qty int4, p_units jsonb, p_lost boolean,
                                    p_bears text, p_note text) RETURNS jsonb
     LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
@@ -649,8 +654,8 @@ BEGIN
                                ELSE jsonb_build_object('at_location_id', v_transfer.location_id, 'owner_location_id', v_transfer.location_id, 'state', 'available') END);
     END IF;
 
-    PERFORM mv_post(CASE WHEN p_lost THEN 'lost' ELSE 'not_sent' END, 'transfers', p_transfers_id, v_legs,
-                    CASE WHEN p_lost THEN 'bears=' || p_bears || COALESCE(' · ' || NULLIF(p_note, ''), '') ELSE p_note END);
+    PERFORM mv_post(CASE WHEN p_lost THEN 'lost' ELSE 'not_sent' END, 'transfers', p_transfers_id, v_legs, p_note,
+                    NULL, NULL, CASE WHEN p_lost THEN p_bears END);
     RETURN jsonb_build_object('taken_off', p_qty, 'units', to_jsonb(v_units), 'on_road', mv_on_road(p_transfers_id));
 END $$;
 
@@ -1226,6 +1231,307 @@ BEGIN
     RETURN mv_baixa(p_serials_id, p_approval_id, true, p_suppliers_id, p_note);
 END $$;
 
+-- Whether the session's user is an admin or a superadmin (user 1 is always one), as app_user_superadmin()
+-- reads it. The flip is the master's admin's (step D).
+CREATE FUNCTION public.app_user_admin() RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT EXISTS (SELECT 1 FROM users u
+                    WHERE u.id = NULLIF(current_setting('app.user', true), '')::integer
+                      AND u.active AND (u.id = 1 OR u.role IN ('admin', 'superadmin')))
+$$;
+
+-- Event 10, flipped (Transferência rápida, step D): (A·A·available) → (B·B·available) at once, with no road. Only
+-- the master's admin or superadmin (MV130), from one active location to another (MV131). Units by name, each
+-- available at A and held by nothing (mv_claimable: MV020, MV091, MV055); counted goods by quantity, up to what A
+-- has (MV132). p_units: [serials_id]; p_counted: [{variants_id, qty}].
+CREATE FUNCTION public.movement_flip(p_from int4, p_to int4, p_units jsonb DEFAULT '[]', p_counted jsonb DEFAULT '[]',
+                                     p_note text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
+    v_units    int4[] := ARRAY(SELECT DISTINCT u::int4 FROM jsonb_array_elements_text(COALESCE(p_units, '[]')) AS x(u) ORDER BY 1);
+    v_unit     int4;
+    v_cell     movement_legs%ROWTYPE;
+    v_line     record;
+    v_have     int4;
+    v_lines    int4 := 0;
+    v_legs     jsonb := '[]';
+    v_movement int8;
+    v_facts    jsonb := jsonb_build_object('from', p_from, 'to', p_to);
+BEGIN
+    IF NOT (app_at_master() AND app_user_admin()) THEN
+        PERFORM mv_refuse('MV130', 'Only the master''s admin flips stock.', v_facts);
+    END IF;
+    IF p_from IS NOT DISTINCT FROM p_to OR (SELECT count(*) FROM locations WHERE id IN (p_from, p_to) AND active) < 2 THEN
+        PERFORM mv_refuse('MV131', 'A flip goes from one active location to another.', v_facts);
+    END IF;
+    FOREACH v_unit IN ARRAY v_units LOOP
+        v_cell := mv_claimable(v_unit, p_from, v_facts || jsonb_build_object('serials_id', v_unit));
+        v_legs := v_legs || mv_pair(v_cell.variants_id, v_unit, 1, mv_cell(v_cell),
+                                    jsonb_build_object('at_location_id', p_to, 'owner_location_id', p_to, 'state', 'available'));
+    END LOOP;
+    FOR v_line IN SELECT c.variants_id, SUM(c.qty)::int4 AS qty, bool_or(i.serial) AS serial, bool_and(i.sellable) AS sellable,
+                         count(v.id) AS known
+                    FROM jsonb_to_recordset(COALESCE(p_counted, '[]')) AS c(variants_id int8, qty int4)
+                    LEFT JOIN variants v ON v.id = c.variants_id LEFT JOIN items i ON i.id = v.items_id
+                   GROUP BY c.variants_id HAVING SUM(c.qty) <> 0 ORDER BY c.variants_id LOOP
+        IF v_line.known = 0 THEN
+            PERFORM mv_refuse('MV113', 'Unknown model.', v_facts || jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF v_line.serial THEN
+            PERFORM mv_refuse('MV073', 'Name the units of a serial-tracked model.', v_facts || jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF NOT v_line.sellable THEN
+            PERFORM mv_refuse('MV015', 'Materials do not move through the ledger.', v_facts || jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        -- both locations' keys, the lower first, as every event takes them
+        PERFORM pg_advisory_xact_lock(least(p_from, p_to), v_line.variants_id::int4);
+        PERFORM pg_advisory_xact_lock(greatest(p_from, p_to), v_line.variants_id::int4);
+        SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+         WHERE variants_id = v_line.variants_id AND state = 'available' AND at_location_id = p_from AND owner_location_id = p_from;
+        IF v_line.qty < 0 OR v_have < v_line.qty THEN
+            PERFORM mv_refuse('MV132', format('Only %s in stock to flip %s.', v_have, v_line.qty),
+                              v_facts || jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have, 'want', v_line.qty));
+        END IF;
+        v_legs := v_legs || mv_pair(v_line.variants_id, NULL, v_line.qty,
+                                    jsonb_build_object('at_location_id', p_from, 'owner_location_id', p_from, 'state', 'available'),
+                                    jsonb_build_object('at_location_id', p_to, 'owner_location_id', p_to, 'state', 'available'));
+        v_lines := v_lines + 1;
+    END LOOP;
+    IF v_legs = '[]' THEN
+        PERFORM mv_refuse('MV133', 'Nothing to flip.', v_facts);
+    END IF;
+    v_movement := mv_post('flipped', NULL, NULL, v_legs, p_note);
+    RETURN jsonb_build_object('movement_id', v_movement, 'units', cardinality(v_units), 'lines', v_lines);
+END $$;
+
+-- Events 16 and 17, out with a customer on a rental or a loan, and back: (L·L·s) → (c·L·s) → (L·L·s). The bike
+-- stays its location's. The document names the unit (MV142), its customer (MV146) and its location (MV093: the
+-- session there, or at the master). Out: the unit available where its owner stands (MV143), held by nothing but the
+-- rental's own fleet resource (MV055). Back: only what went out on this document (MV144), home to its owner. Each
+-- is once: again is nothing ({done: false}).
+CREATE FUNCTION public.mv_lend(p_out boolean, p_kind_out text, p_kind_back text, p_ref_type text, p_ref_id int8,
+                               p_serials_id int4, p_customer int4, p_location int4, p_own_resource int8) RETURNS jsonb
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_cell  movement_legs%ROWTYPE;
+    v_last  movements%ROWTYPE;
+    v_mine  boolean;
+    v_kind  text := CASE WHEN p_out THEN p_kind_out ELSE p_kind_back END;
+    v_facts jsonb := jsonb_build_object('ref_type', p_ref_type, 'ref_id', p_ref_id, 'serials_id', p_serials_id);
+BEGIN
+    IF NOT (app_at_master() OR app_location() = p_location) THEN
+        PERFORM mv_refuse('MV093', 'The document is another location''s.', v_facts || jsonb_build_object('location_id', p_location));
+    END IF;
+    IF p_serials_id IS NULL THEN
+        PERFORM mv_refuse('MV142', 'The document names no bike.', v_facts);
+    END IF;
+    IF p_customer IS NULL OR NOT EXISTS (SELECT 1 FROM customers WHERE id = p_customer) THEN
+        PERFORM mv_refuse('MV146', 'A bike out with someone is with a customer: the document names none.', v_facts);
+    END IF;
+    PERFORM 1 FROM serials WHERE id = p_serials_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV020', 'Unit not found.', v_facts);
+    END IF;
+    v_cell := mv_unit_leg(p_serials_id);
+    SELECT * INTO v_last FROM movements WHERE id = v_cell.movements_id;
+    v_mine := v_last.ref_type IS NOT DISTINCT FROM p_ref_type AND v_last.ref_id IS NOT DISTINCT FROM p_ref_id;
+    IF v_mine AND v_last.kind = v_kind THEN
+        RETURN jsonb_build_object('done', false);
+    END IF;
+    IF p_out THEN
+        IF v_cell.id IS NULL OR v_cell.at_location_id IS DISTINCT FROM p_location OR v_cell.owner_location_id IS DISTINCT FROM p_location
+           OR v_cell.state <> 'available' THEN
+            PERFORM mv_refuse('MV143', 'The unit is not available to go out.',
+                              v_facts || jsonb_build_object('state', v_cell.state, 'location_id', p_location));
+        END IF;
+        IF EXISTS (SELECT 1 FROM unit_claims c WHERE c.serials_id = p_serials_id
+                      AND NOT (c.kind = 'fleet' AND c.ref_id IS NOT DISTINCT FROM p_own_resource)) THEN
+            PERFORM mv_refuse('MV055', 'The unit is held by something else.', v_facts || jsonb_build_object('claim', mv_unit_claim(p_serials_id)));
+        END IF;
+        PERFORM mv_post(p_kind_out, p_ref_type, p_ref_id,
+                        mv_pair(v_cell.variants_id, p_serials_id, 1, mv_cell(v_cell),
+                                mv_cell(v_cell) || jsonb_build_object('at_location_id', NULL, 'at_customer_id', p_customer)));
+    ELSE
+        IF NOT (v_mine AND v_last.kind = p_kind_out) THEN
+            PERFORM mv_refuse('MV144', 'The unit is not out on this document.', v_facts);
+        END IF;
+        PERFORM mv_post(p_kind_back, p_ref_type, p_ref_id,
+                        mv_pair(v_cell.variants_id, p_serials_id, 1, mv_cell(v_cell),
+                                mv_cell(v_cell) || jsonb_build_object('at_customer_id', NULL, 'at_location_id', v_cell.owner_location_id)));
+    END IF;
+    RETURN jsonb_build_object('done', true);
+END $$;
+
+-- A rental (bookings): its fleet resource's bike, its customer, its location. Found (MV140); out only while it is
+-- to come or under way (MV141); back whatever its status, as a bike comes back whatever its document says.
+CREATE FUNCTION public.mv_rental(p_bookings_id int8, p_out boolean) RETURNS jsonb
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_booking record;
+BEGIN
+    SELECT b.id, b.customer_id, b.status, b.location_id, b.resource_id, r.serials_id::int4 AS serials_id
+      INTO v_booking
+      FROM bookings b LEFT JOIN resources r ON r.id = b.resource_id
+     WHERE b.id = p_bookings_id
+       FOR UPDATE OF b;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV140', 'Booking not found.', jsonb_build_object('bookings_id', p_bookings_id));
+    END IF;
+    IF p_out AND v_booking.status NOT IN ('pending', 'reserved', 'confirmed', 'in_use') THEN
+        PERFORM mv_refuse('MV141', 'The document is not open.', jsonb_build_object('bookings_id', p_bookings_id, 'document_status', v_booking.status));
+    END IF;
+    RETURN mv_lend(p_out, 'rented', 'rental_back', 'bookings', p_bookings_id, v_booking.serials_id,
+                   v_booking.customer_id, v_booking.location_id, v_booking.resource_id);
+END $$;
+
+-- A loan (loans): its bike, its customer (migration 026; a loan without one is refused, MV146), its location.
+-- Found (MV145); out only while it is being prepared or with the person (MV141); back whatever its status.
+CREATE FUNCTION public.mv_loan(p_loans_id int8, p_out boolean) RETURNS jsonb
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_loan loans%ROWTYPE;
+BEGIN
+    SELECT * INTO v_loan FROM loans WHERE id = p_loans_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV145', 'Loan not found.', jsonb_build_object('loans_id', p_loans_id));
+    END IF;
+    IF p_out AND v_loan.status NOT IN ('preparando', 'com_a_pessoa') THEN
+        PERFORM mv_refuse('MV141', 'The document is not open.', jsonb_build_object('loans_id', p_loans_id, 'document_status', v_loan.status));
+    END IF;
+    RETURN mv_lend(p_out, 'loaned', 'loan_back', 'loans', p_loans_id, v_loan.serials_id::int4,
+                   v_loan.customers_id, v_loan.location_id, NULL);
+END $$;
+
+CREATE FUNCTION public.movement_rent_out(p_bookings_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN RETURN mv_rental(p_bookings_id, true); END $$;
+
+CREATE FUNCTION public.movement_rent_back(p_bookings_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN RETURN mv_rental(p_bookings_id, false); END $$;
+
+CREATE FUNCTION public.movement_loan_out(p_loans_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN RETURN mv_loan(p_loans_id, true); END $$;
+
+CREATE FUNCTION public.movement_loan_back(p_loans_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN RETURN mv_loan(p_loans_id, false); END $$;
+
+-- Counted goods at the session's location, line by line, as one movement. A line gives its difference (qty) or the
+-- balance it is to have (balance), worked out under the model's lock, as adjustStock's qty_new was; a model set to a
+-- balance is given once (MV116). A gain comes from the books → (L·L·available); a loss goes
+-- (L·L·available) → (L·L·written_off), up to what is there (MV114). Found is a gain; damaged, loss and expired are
+-- losses (MV115). A serial-tracked model is adjusted through its unit (MV110), materials not at all (MV015).
+-- Answers each model's balance before and after, and the movement (none when nothing differs).
+CREATE FUNCTION public.mv_adjust(p_kind text, p_ref_type text, p_ref_id int8, p_lines jsonb, p_reason text, p_note text)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_here     int4 := app_location();
+    v_line     record;
+    v_have     int4;
+    v_delta    int4;
+    v_legs     jsonb := '[]';
+    v_items    jsonb := '[]';
+    v_movement int8;
+BEGIN
+    FOR v_line IN SELECT c.variants_id, SUM(c.qty)::int4 AS qty, MAX(c.balance)::int4 AS balance,
+                         count(*) AS n, count(c.balance) AS balances,
+                         bool_or(i.serial) AS serial, bool_and(i.sellable) AS sellable, count(v.id) AS known
+                    FROM jsonb_to_recordset(COALESCE(p_lines, '[]')) AS c(variants_id int8, qty int4, balance int4)
+                    LEFT JOIN variants v ON v.id = c.variants_id LEFT JOIN items i ON i.id = v.items_id
+                   GROUP BY c.variants_id ORDER BY c.variants_id LOOP
+        IF v_line.known = 0 THEN
+            PERFORM mv_refuse('MV113', 'Unknown model.', jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF v_line.serial THEN
+            PERFORM mv_refuse('MV110', 'A bike is adjusted through its unit.', jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF NOT v_line.sellable THEN
+            PERFORM mv_refuse('MV015', 'Materials do not move through the ledger.', jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF v_line.balances > 0 AND v_line.n > 1 THEN
+            PERFORM mv_refuse('MV116', 'A model set to a balance is given once.', jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        PERFORM pg_advisory_xact_lock(v_here, v_line.variants_id::int4);
+        SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+         WHERE variants_id = v_line.variants_id AND state = 'available' AND at_location_id = v_here AND owner_location_id = v_here;
+        v_delta := CASE WHEN v_line.balances > 0 THEN v_line.balance - v_have ELSE COALESCE(v_line.qty, 0) END;
+        CONTINUE WHEN v_delta = 0;
+        IF (p_reason = 'found' AND v_delta < 0) OR (p_reason IN ('damaged', 'loss', 'expired') AND v_delta > 0) THEN
+            PERFORM mv_refuse('MV115', 'Found is a gain; damaged, loss and expired are losses.',
+                              jsonb_build_object('variants_id', v_line.variants_id, 'reason', p_reason, 'delta', v_delta));
+        END IF;
+        IF v_have + v_delta < 0 THEN
+            PERFORM mv_refuse('MV114', format('Only %s in stock to take %s.', v_have, -v_delta),
+                              jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have, 'want', -v_delta));
+        END IF;
+        v_legs := v_legs || CASE WHEN v_delta > 0
+            THEN mv_pair(v_line.variants_id, NULL, v_delta, jsonb_build_object('state', 'available'),
+                         jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available'))
+            ELSE mv_pair(v_line.variants_id, NULL, -v_delta,
+                         jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available'),
+                         jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'written_off')) END;
+        v_items := v_items || jsonb_build_object('variants_id', v_line.variants_id, 'before', v_have,
+                                                 'after', v_have + v_delta, 'delta', v_delta);
+    END LOOP;
+    IF v_legs <> '[]' THEN
+        v_movement := mv_post(p_kind, p_ref_type, p_ref_id, v_legs, p_note, NULL, NULL, p_reason);
+    END IF;
+    RETURN jsonb_build_object('adjusted', jsonb_array_length(v_items), 'movement_id', v_movement, 'items', v_items);
+END $$;
+
+-- Event 22, adjusted (Ajuste, both modules; replaces adjustStock and adjustStockBatch): one line or many, with its
+-- reason (MV111: found, damaged, loss, expired, count, other) and its note (MV112), as adjustStock asked.
+CREATE FUNCTION public.movement_adjust(p_lines jsonb, p_reason text, p_note text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN
+    IF p_reason IS NULL OR p_reason NOT IN ('found', 'damaged', 'loss', 'expired', 'count', 'other') THEN
+        PERFORM mv_refuse('MV111', 'Say why: found, damaged, loss, expired, count or other.', jsonb_build_object('given', p_reason));
+    END IF;
+    IF NULLIF(trim(p_note), '') IS NULL THEN
+        PERFORM mv_refuse('MV112', 'An adjustment needs its note.');
+    END IF;
+    RETURN mv_adjust('adjusted', NULL, NULL, p_lines, p_reason, trim(p_note));
+END $$;
+
+-- Event 23, counted (Inventário, core/stockCount.php's close): each counted part of an open count (MV121) of this
+-- location (MV093) set to what was counted, as one movement with reason count. Several lines of one model add up;
+-- a line not counted is left alone; materials and units are not the ledger's to adjust here. The module closes
+-- its document after (fechado, parts_adjusted from the answer); closing twice posts nothing the second time.
+CREATE FUNCTION public.movement_count_close(p_counts_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user  int4 := mv_user();   -- an empty session is refused before anything else
+    v_count stock_counts%ROWTYPE;
+    v_lines jsonb;
+BEGIN
+    SELECT * INTO v_count FROM stock_counts WHERE id = p_counts_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV120', 'Stock count not found.', jsonb_build_object('stock_counts_id', p_counts_id));
+    END IF;
+    IF v_count.location_id IS DISTINCT FROM app_location() THEN
+        PERFORM mv_refuse('MV093', 'The document is another location''s.', jsonb_build_object('location_id', v_count.location_id));
+    END IF;
+    IF v_count.status <> 'contando' THEN
+        PERFORM mv_refuse('MV121', 'The count is not open.', jsonb_build_object('stock_counts_id', p_counts_id, 'document_status', v_count.status));
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('variants_id', l.variants_id, 'balance', l.counted) ORDER BY l.variants_id), '[]')
+      INTO v_lines
+      FROM (SELECT cl.variants_id, SUM(cl.counted_qty)::int4 AS counted
+              FROM stock_count_lines cl JOIN variants v ON v.id = cl.variants_id JOIN items i ON i.id = v.items_id
+             WHERE cl.counts_id = p_counts_id AND cl.kind = 'part' AND cl.counted_qty IS NOT NULL AND NOT i.serial AND i.sellable
+             GROUP BY cl.variants_id) l;
+    RETURN mv_adjust('counted', 'stock_counts', p_counts_id, v_lines, 'count', NULL);
+END $$;
+
 -- The unit's position on the layer: where, whose, its state and since when.
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
@@ -1417,7 +1723,7 @@ GRANT SELECT ON public.movements, public.movement_legs, public.positions, public
       public.stock_on_hand, public.stock_sellable, public.owned_elsewhere, public.road_by_transfer, public.stock_total,
       public.movement_check_balance, public.movement_check_chain, public.movement_check_positions,
       public.movement_check_serial_mix, public.movement_check_roads, public.unit_claims TO app_staff;
-REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8),
+REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8, text),
        public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
        public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb),
        public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text),
@@ -1426,7 +1732,11 @@ REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_unit
        public.mv_claimable(int4, int4, jsonb), public.claim_hold(int8, int4), public.claim_release(int8, int4),
        public.claim_sale(int8, int4), public.claim_sale_release(int8), public.claim_fleet(int8, int4), public.claim_fleet_release(int8),
        public.mv_baixa(int4, int8, boolean, int8, text), public.movement_write_off(int4, int8, text),
-       public.movement_to_provider(int4, int8, int8, text) FROM PUBLIC;
+       public.movement_to_provider(int4, int8, int8, text), public.movement_flip(int4, int4, jsonb, jsonb, text),
+       public.app_user_admin(), public.mv_lend(boolean, text, text, text, int8, int4, int4, int4, int8),
+       public.mv_rental(int8, boolean), public.mv_loan(int8, boolean), public.movement_rent_out(int8), public.movement_rent_back(int8),
+       public.movement_loan_out(int8), public.movement_loan_back(int8), public.mv_adjust(text, text, int8, jsonb, text, text),
+       public.movement_adjust(jsonb, text, text), public.movement_count_close(int8) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
 GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
@@ -1435,4 +1745,7 @@ GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(
       public.movement_not_sent(int8, int8, int4, jsonb, text), public.movement_lost(int8, int8, int4, jsonb, text, text),
       public.movement_swap(int8, int4, int4, text), public.claim_hold(int8, int4), public.claim_release(int8, int4),
       public.claim_sale(int8, int4), public.claim_sale_release(int8), public.claim_fleet(int8, int4), public.claim_fleet_release(int8),
-      public.movement_write_off(int4, int8, text), public.movement_to_provider(int4, int8, int8, text) TO app_staff;
+      public.movement_write_off(int4, int8, text), public.movement_to_provider(int4, int8, int8, text),
+      public.app_user_admin(), public.movement_flip(int4, int4, jsonb, jsonb, text), public.movement_rent_out(int8),
+      public.movement_rent_back(int8), public.movement_loan_out(int8), public.movement_loan_back(int8),
+      public.movement_adjust(jsonb, text, text), public.movement_count_close(int8) TO app_staff;

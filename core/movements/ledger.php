@@ -278,3 +278,94 @@ function movementToProvider(PDO $pdo, int $serialId, int $approvalId, ?int $supp
     return movementCall($pdo, 'movement_to_provider', [[$serialId, 'integer'], [$approvalId, 'bigint'], [$supplierId, 'bigint'], [$note, 'text']]);
 }
 
+/**
+ * Counted goods' lines as the database takes them: each ['variants_id' => …, 'qty' => …], or for an adjustment
+ * ['variants_id' => …, 'balance' => …] (the balance it is to have). A key left out or null is not sent.
+ */
+function movementLines(array $lines): array
+{
+    $out = [];
+    foreach ($lines as $line) {
+        $row = [];
+        foreach (['variants_id', 'qty', 'balance'] as $key) {
+            if (isset($line[$key])) {
+                $row[$key] = (int) $line[$key];
+            }
+        }
+        $out[] = $row;
+    }
+    return $out;
+}
+
+/**
+ * Event 10, flipped (Transferência rápida, step D): units and counted goods from $from to $to at once, with no road.
+ * Only the master's admin or superadmin. Units by name, each available at $from and held by nothing; counted goods
+ * as lines, ['variants_id' => …, 'qty' => …], up to what $from has.
+ *
+ * @return array{movement_id: int, units: int, lines: int}
+ */
+function movementFlip(PDO $pdo, int $from, int $to, array $serialIds = [], array $counted = [], ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_flip', [[$from, 'integer'], [$to, 'integer'],
+                                                [array_values(array_map('intval', $serialIds)), 'jsonb'],
+                                                [movementLines($counted), 'jsonb'], [$note, 'text']]);
+}
+
+/**
+ * Event 16, a rental goes out: the booking's fleet bike, to the booking's customer, still its location's. Refused
+ * unless the booking is to come or under way and the bike is available where it is kept. Again is nothing.
+ *
+ * @return array{done: bool}
+ */
+function movementRentOut(PDO $pdo, int $bookingId): array
+{
+    return movementCall($pdo, 'movement_rent_out', [[$bookingId, 'bigint']]);
+}
+
+/** Event 17, the rental's bike back home, whatever the booking's status; only what went out on it. @return array{done: bool} */
+function movementRentBack(PDO $pdo, int $bookingId): array
+{
+    return movementCall($pdo, 'movement_rent_back', [[$bookingId, 'bigint']]);
+}
+
+/**
+ * Event 16, a loan goes out: its bike, to the loan's customer (a loan names one), still its location's. Refused
+ * unless the loan is being prepared or with the person, and the bike is available and held by nothing.
+ *
+ * @return array{done: bool}
+ */
+function movementLoanOut(PDO $pdo, int $loanId): array
+{
+    return movementCall($pdo, 'movement_loan_out', [[$loanId, 'bigint']]);
+}
+
+/** Event 17, the loan's bike back home, whatever the loan's status; only what went out on it. @return array{done: bool} */
+function movementLoanBack(PDO $pdo, int $loanId): array
+{
+    return movementCall($pdo, 'movement_loan_back', [[$loanId, 'bigint']]);
+}
+
+/**
+ * Event 22, adjusted (Ajuste; adjustStock and adjustStockBatch): counted goods at the session's location, one line
+ * or many, each ['variants_id' => …, 'qty' => the difference] or ['variants_id' => …, 'balance' => what it is to
+ * have] (worked out under the model's lock), with its reason (found, damaged, loss, expired, count, other) and note.
+ * A bike is refused: it is adjusted through its unit. Nothing differing posts nothing (movement_id null).
+ *
+ * @return array{adjusted: int, movement_id: ?int, items: list<array{variants_id: int, before: int, after: int, delta: int}>}
+ */
+function movementAdjust(PDO $pdo, array $lines, string $reason, string $note): array
+{
+    return movementCall($pdo, 'movement_adjust', [[movementLines($lines), 'jsonb'], [$reason, 'text'], [$note, 'text']]);
+}
+
+/**
+ * Event 23, counted (Inventário): an open count's parts set to what was counted, as one movement, reason count.
+ * The module closes the count after (fechado; parts_adjusted is adjusted). Closing twice posts nothing again.
+ *
+ * @return array{adjusted: int, movement_id: ?int, items: list<array{variants_id: int, before: int, after: int, delta: int}>}
+ */
+function movementCountClose(PDO $pdo, int $countId): array
+{
+    return movementCall($pdo, 'movement_count_close', [[$countId, 'bigint']]);
+}
+

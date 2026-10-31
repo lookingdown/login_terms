@@ -13,7 +13,8 @@
  *
  * A key is a prefix and an English word: unitWord_<word>, mvKind_<kind>, planKind_<kind>, unitState_<state>,
  * claim_<kind>, servicePhase_<phase>, trail_<step>, trailSub_<key>, story_<kind>, condition_<state>,
- * place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>.
+ * place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>, reason_<key> (a movement's reason: who bears a
+ * loss here; an adjustment's found, damaged, loss, expired, count and other are the house's, in messages.js).
  * A new locale is a third block with the same keys.
  */
 
@@ -199,8 +200,28 @@ export const movementMessages = {
     mvRefused_MV098: 'Fleet resource not found.',
     mvRefused_MV099: 'The fleet resource has its unit.',
     mvRefused_MV100: 'The unit is out with a customer.',
-    bears_origin: 'borne by the origin',
-    bears_carrier: 'borne by the carrier',
+    mvRefused_MV110: 'A bike is adjusted through its unit: open the unit’s page.',
+    mvRefused_MV111: 'Pick why: found, damaged, loss, expired, count or other.',
+    mvRefused_MV112: 'An adjustment needs its note.',
+    mvRefused_MV113: 'Unknown model #{variants_id}.',
+    mvRefused_MV114: 'Only {have} in stock to take {want}.',
+    mvRefused_MV115: 'Found is a gain; damaged, loss and expired are losses.',
+    mvRefused_MV116: 'A model set to a balance is given once.',
+    mvRefused_MV120: 'Stock count #{stock_counts_id} not found.',
+    mvRefused_MV121: 'This count is not open any more.',
+    mvRefused_MV130: 'Only the master’s admin makes a quick transfer.',
+    mvRefused_MV131: 'A quick transfer goes from one active location to another.',
+    mvRefused_MV132: 'Only {have} in stock to transfer {want}.',
+    mvRefused_MV133: 'Nothing to transfer.',
+    mvRefused_MV140: 'Rental #{bookings_id} not found.',
+    mvRefused_MV141: 'This rental or loan is not open.',
+    mvRefused_MV142: 'The rental or loan names no bike.',
+    mvRefused_MV143: 'The bike is not available here to go out.',
+    mvRefused_MV144: 'The bike did not go out on this rental or loan.',
+    mvRefused_MV145: 'Loan #{loans_id} not found.',
+    mvRefused_MV146: 'A bike out with someone is with a customer: pick the customer first.',
+    reason_origin: 'Borne by the origin',
+    reason_carrier: 'Borne by the carrier',
   },
 
   pt: {
@@ -384,19 +405,41 @@ export const movementMessages = {
     mvRefused_MV098: 'Recurso da frota não encontrado.',
     mvRefused_MV099: 'O recurso da frota já tem a sua moto.',
     mvRefused_MV100: 'A moto está com um cliente.',
-    bears_origin: 'por conta da origem',
-    bears_carrier: 'por conta da transportadora',
+    mvRefused_MV110: 'Uma moto se ajusta pela sua página: abra a moto.',
+    mvRefused_MV111: 'Escolha o motivo: encontrado, danificado, perda, expirado, inventário ou outro.',
+    mvRefused_MV112: 'O ajuste precisa de uma observação.',
+    mvRefused_MV113: 'Modelo #{variants_id} desconhecido.',
+    mvRefused_MV114: 'Só há {have} no estoque para tirar {want}.',
+    mvRefused_MV115: 'Encontrado é entrada; danificado, perda e expirado são saídas.',
+    mvRefused_MV116: 'Um modelo ajustado a um saldo vai uma vez só.',
+    mvRefused_MV120: 'Inventário #{stock_counts_id} não encontrado.',
+    mvRefused_MV121: 'Este inventário não está mais aberto.',
+    mvRefused_MV130: 'Só o administrador da matriz faz a transferência rápida.',
+    mvRefused_MV131: 'A transferência rápida vai de uma unidade ativa para outra.',
+    mvRefused_MV132: 'Só há {have} no estoque para transferir {want}.',
+    mvRefused_MV133: 'Nada a transferir.',
+    mvRefused_MV140: 'Locação #{bookings_id} não encontrada.',
+    mvRefused_MV141: 'Esta locação ou empréstimo não está aberto.',
+    mvRefused_MV142: 'A locação ou o empréstimo não indica a moto.',
+    mvRefused_MV143: 'A moto não está disponível aqui para sair.',
+    mvRefused_MV144: 'A moto não saiu nesta locação ou empréstimo.',
+    mvRefused_MV145: 'Empréstimo #{loans_id} não encontrado.',
+    mvRefused_MV146: 'Moto com alguém está com um cliente: escolha o cliente primeiro.',
+    reason_origin: 'Por conta da origem',
+    reason_carrier: 'Por conta da transportadora',
   },
 }
 
 /**
  * A refusal's facts as i18n parameters. The facts that are themselves keys become words: a ledger state, a
- * remessa's status (the module's shipState_<status>) and what holds a unit.
+ * remessa's status (the module's shipState_<status>), what holds a unit, and a movement's reason. Another
+ * document's status comes as document_status, not turned into words.
  */
 export function refusalParams(t, facts = {}) {
   const params = { ...facts }
   if (facts.state) params.state = t('message.unitState_' + facts.state)
   if (facts.status) params.status = t('message.shipState_' + facts.status)
   if (facts.claim) params.claim = t('message.claim_' + facts.claim)
+  if (facts.reason) params.reason = t('message.reason_' + facts.reason)
   return params
 }

@@ -106,7 +106,7 @@ function movementsList(PDO $pdo, array $in, ?int $location = null): array
             'qty' => (int) $r['qty'],
             'from' => $r['from_cell'], 'to' => $r['to_cell'], 'names' => $names,
             'ref' => $r['ref_type'] === null ? null : ['type' => $r['ref_type'], 'id' => (int) $r['ref_id']],
-            'note' => $r['note'], 'who' => $r['who'],
+            'note' => $r['note'], 'reason' => $r['reason'], 'who' => $r['who'],
         ];
         if ($balance) {
             $row['balance'] = (int) $r['balance'];

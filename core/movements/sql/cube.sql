@@ -87,7 +87,7 @@ SELECT so.serials_id, 'service', so.id, 'location', so.location_id, so.customers
   FROM service_orders so
  WHERE so.serials_id IS NOT NULL AND so.scheduled_date IS NOT NULL AND so.service_status <> 'cancelled'
 UNION ALL
-SELECT l.serials_id::int4, 'loan', l.id, 'customer', NULL, NULL,
+SELECT l.serials_id::int4, 'loan', l.id, 'customer', NULL, l.customers_id,
        tsrange(COALESCE(l.out_at, l.created_at), l.due_at + 1),
        CASE WHEN l.out_at IS NOT NULL THEN tsrange(l.out_at, l.returned_at) END
   FROM loans l
