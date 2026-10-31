@@ -1,6 +1,6 @@
 <?php
 /**
- * core/positions.php — the reading side of the movement layer (movements-code.md §2).
+ * core/movements/positions.php — the reading side of the movement layer (movements-code.md §2).
  *
  * The views are the contract: the same names, columns and answers on today's tables (step A)
  * and on the layer (step C). A list screen starts from a positions*() Select and narrows,
@@ -56,6 +56,32 @@ function positionsOwnedElsewhere(PDO $pdo, ?Select $parent = null, string $as = 
 function positionsRoad(PDO $pdo, ?Select $parent = null, string $as = 'rd'): Select
 {
     return positionsFrom($pdo, $parent, "road_by_transfer AS {$as}", $as);
+}
+
+/**
+ * A slice of the cube: every unit's cell at $at (sql/cube.sql whereabouts()), with the waypoint its
+ * documents plan for that moment. With $knownAt, the books as they stood then: only what had been
+ * recorded by $knownAt. A moment ahead finds each unit's current stay with its plans.
+ */
+function positionsAt(PDO $pdo, DateTimeInterface $at, ?DateTimeInterface $knownAt = null, ?Select $parent = null, string $as = 'wa'): Select
+{
+    $select = $parent ? $parent->subSelect() : Select::new($pdo);
+    $from = 'whereabouts(CAST(' . $select->bindInline($at->format('Y-m-d H:i:s')) . ' AS timestamp), CAST('
+        . $select->bindInline($knownAt?->format('Y-m-d H:i:s')) . " AS timestamp)) AS {$as}";
+    return $select->columns("{$as}.*")->from($from);
+}
+
+/** A unit's line through the cube: its stays in order, then what its documents plan from here on. */
+function unitTrajectory(PDO $pdo, int $serialId): array
+{
+    return Select::new($pdo)->columns('ut.*')->from('unit_trajectory AS ut')
+        ->where('ut.serials_id = ', $serialId)->orderBy('ut.starts', 'ut.layer')->fetchAll();
+}
+
+/** Encounters that cannot happen: two plans at once, a plan where the unit will not be, a rental of a sold unit. */
+function positionsConflicts(PDO $pdo, ?Select $parent = null, string $as = 'wc'): Select
+{
+    return positionsFrom($pdo, $parent, "unit_waypoint_conflicts AS {$as}", $as);
 }
 
 /**

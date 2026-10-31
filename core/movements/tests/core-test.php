@@ -1,15 +1,14 @@
 <?php
 /**
- * core/movements.php and core/positions.php against imobee (PostgreSQL 18), after
- * sql/movements-layer.sql and tests/dispatch-test.sql on a scratch copy.
+ * core/movements against imobee (PostgreSQL 18), after sql/layer.sql and tests/dispatch-test.sql
+ * on a scratch copy.
  *
  *   PGHOST=… PGPORT=… PGDATABASE=imobee PGUSER=… php core-test.php path/to/vendor/autoload.php
  */
 declare(strict_types=1);
 
 require $argv[1] ?? 'vendor/autoload.php';
-require __DIR__ . '/../core/movements.php';
-require __DIR__ . '/../core/positions.php';
+require __DIR__ . '/../movements.php';
 
 use Atlas\Query\Select;
 
@@ -73,3 +72,13 @@ $select->where('v.id IN ', positionsSellable($pdo, $select)
     ->where('ss.location_id = ', 1)->where('ss.qty > 0'));
 $sellable = $select->orderBy('v.id')->fetchAll();
 check('the catalogue nests the sellable models', array_column($sellable, 'sku') === ['CAP-M'], $sellable);
+
+// the cube (after tests/cube-test.sql): a slice then and now, a unit's line, the encounters that cannot happen
+$then = positionsAt($pdo, new DateTimeImmutable('2026-10-15'))->where('wa.serials_id = ', 503)->fetchOne();
+$now = positionsAt($pdo, new DateTimeImmutable())->where('wa.serials_id = ', 503)->fetchOne();
+check('bike 503 stood at the master on 15 Oct, and is on its road now', $then['place_kind'] === 'location' && $now['place_kind'] === 'road', [$then['place_kind'], $now['place_kind']]);
+$asKnown = positionsAt($pdo, new DateTimeImmutable('2026-10-15'), new DateTimeImmutable('2026-10-15'));
+check('as the books stood on 15 Oct, they knew no unit yet', positionsCount($pdo, $asKnown) === 0);
+$line = unitTrajectory($pdo, 502);
+check('bike 502\'s line: one stay, then a rental and a service planned', array_column($line, 'how') === ['opening', 'rental', 'service'], array_column($line, 'how'));
+check('two encounters cannot happen', positionsCount($pdo, positionsConflicts($pdo)) === 2, positionsConflicts($pdo)->fetchAll());

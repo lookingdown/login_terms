@@ -1,5 +1,5 @@
 -- movement_dispatch, the views, the time axis and the health checks on imobee's own schema (PostgreSQL 18).
--- Run on a scratch copy after sql/movements-layer.sql: psql -d scratch -f dispatch-test.sql
+-- Run on a scratch copy after sql/layer.sql: psql -d scratch -f dispatch-test.sql
 -- Some statements fail on purpose: each \echo says what to look for.
 \set ON_ERROR_STOP 0
 \pset footer off

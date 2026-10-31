@@ -1,20 +1,28 @@
 # The movement core — the proposal, revision 3
 
-This supersedes `docs/movements-core.md` (revision 1). It makes `movements-code.md` concrete:
-- the shape Johan approved: functions in `core/positions.php` and `core/movements.php`, built like `core/serials.php`
+This supersedes `docs/movements-core.md` (revision 1). It makes `movements-code.md` concrete, all of it
+in one place, `core/movements/`, as on the server (`/var/sys/core/movements/`):
+- functions built like `core/serials.php`, loaded by one require
 - the layer of code §3.1
 - one event, `movement_dispatch`, written out in full as the pattern for the others
+- the cube: every unit's place at any moment, its line, and the roster ahead (`CUBE.md`)
 
-Everything here runs on imobee's own schema (`impublic.sql`, PostgreSQL 18.6). The tests are in `tests/`.
+Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreSQL 18.6).
 
 | file | what | step |
 |---|---|---|
-| `sql/movements-layer.sql` | the layer's tables (`transfer_units`, `movements`, `movement_legs`, `positions` kept by trigger) and the append-only guard; `mv_refuse()`, `mv_user()` and `movement_dispatch()`; the views on the layer (unit_positions, stock_on_hand, stock_sellable, owned_elsewhere, road_by_transfer, stock_total); the grants to `app_staff` | B (the views as the switch defines them) |
-| `core/movements.php` | `MovementRefused`, `movementCall()` (the one door), `movementDispatch()` | C |
-| `core/positions.php` | `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | A |
+| `movements.php` | the one require: `require_once '/var/sys/core/movements/movements.php';` | |
+| `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()` | C |
+| `positions.php` | the reading side: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()`; the cube's `positionsAt()`, `unitTrajectory()`, `positionsConflicts()` | A |
+| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `movement_dispatch()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
+| `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `whereabouts(t[, known_at])`, `unit_waypoints`, `unit_trajectory`, `unit_waypoint_conflicts` | B |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
+| `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
 | `tests/dispatch-test.sql` | 11 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards | |
-| `tests/core-test.php` | 11 cases through PHP | |
+| `tests/cube-test.sql` | 8 cases on the time axis: stays, slices in both clocks, the roster, conflicts, refusals | |
+| `tests/core-test.php` | 15 cases through PHP | |
+
+Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, then `php tests/core-test.php path/to/vendor/autoload.php`.
 
 ## The draft's ERP controls, in the layer
 - **Health checks**, the draft's `v_recon_*`: `movement_check_balance`, `_chain`, `_positions`, `_serial_mix` and `_roads`. Each must answer nothing, and anything found is fixed by posting a movement.
@@ -75,10 +83,10 @@ These are the names and arguments of code §4, written on `movement_dispatch`'s 
 - `claimHold` / `claimRelease` (`transfer_units`); `claimSale` / `claimSaleRelease`, which refuses a unit still in assembly. Assembly's own job-to-unit link isn't a claim. `claimFleet` / `claimFleetRelease`.
 
 ## Step A
-`core/positions.php` is step A's code. In step A the same functions read the same view names and columns, defined on today's tables. Those definitions must answer what today's readers answer (serialState.php, stockUnits.php, the stockLedger.php readers), module by module, so I write them from those files.
+`positions.php` is step A's code. In step A the same functions read the same view names and columns, defined on today's tables. Those definitions must answer what today's readers answer (serialState.php, stockUnits.php, the stockLedger.php readers), module by module, so I write them from those files.
 
 ## What changed from revision 1
-- functions in `core/positions.php` and `core/movements.php`, not a `Movements` namespace of classes
+- functions in one place, `core/movements/` (`ledger.php`, `positions.php`, one loader), not a `Movements` namespace of classes
 - `positions` kept by a trigger, instead of "never a column"
 - the approved names: `road_by_transfer`, `claim_sale`, `MovementRefused`, `MV0nn`
 - one call shape: lists as jsonb, answers as jsonb, a savepoint per call, refusals read from the `mv:` line

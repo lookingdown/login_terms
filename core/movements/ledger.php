@@ -1,6 +1,6 @@
 <?php
 /**
- * core/movements.php — the writing side of the movement layer (movements-code.md §4).
+ * core/movements/ledger.php — the writing side of the movement layer (movements-code.md §4).
  *
  * One function per event, each one call to its database function, which holds the guards.
  * Inside the caller's transaction a call runs in a savepoint: a refusal undoes the event
