@@ -143,19 +143,70 @@ BEGIN
     RETURN v::integer;
 END $$;
 
+-- The posting primitive: the one way into the journal. An event function checks its guards, builds its legs, then
+-- makes this one call: the movement and its legs go in together, and the legs must balance per model (a movement
+-- makes nothing and loses nothing: MV003). Each leg is an object of p_legs: variants_id, serials_id (null for
+-- counted goods), qty, and its cell's at_*, owner_* and state; a key left out is null.
+CREATE FUNCTION public.mv_post(p_kind text, p_ref_type text, p_ref_id int8, p_legs jsonb, p_note text DEFAULT NULL,
+                               p_occurred_at timestamp DEFAULT NULL, p_corrects_id int8 DEFAULT NULL) RETURNS int8
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_movement int8;
+BEGIN
+    INSERT INTO movements (kind, users_id, ref_type, ref_id, note, occurred_at, corrects_id)
+    VALUES (p_kind, mv_user(), p_ref_type, p_ref_id, p_note,
+            COALESCE(p_occurred_at, date_trunc('second', LOCALTIMESTAMP)), p_corrects_id)
+    RETURNING id INTO v_movement;
+    INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, at_transfer_id, at_customer_id,
+                               at_supplier_id, owner_location_id, owner_customer_id, owner_supplier_id, state)
+    SELECT v_movement, (e->>'variants_id')::int8, (e->>'serials_id')::int4, (e->>'qty')::int4,
+           (e->>'at_location_id')::int4, (e->>'at_transfer_id')::int8, (e->>'at_customer_id')::int4,
+           (e->>'at_supplier_id')::int8, (e->>'owner_location_id')::int4, (e->>'owner_customer_id')::int4,
+           (e->>'owner_supplier_id')::int8, e->>'state'
+      FROM jsonb_array_elements(p_legs) WITH ORDINALITY AS x(e, n)
+     ORDER BY n;
+    IF EXISTS (SELECT 1 FROM movement_legs WHERE movements_id = v_movement GROUP BY variants_id HAVING SUM(qty) <> 0) THEN
+        PERFORM mv_refuse('MV003', 'A movement''s legs must balance per model.', jsonb_build_object('kind', p_kind));
+    END IF;
+    RETURN v_movement;
+END $$;
+
+-- A leg's cell, where · owner · state, as the jsonb a leg is built from: every key present, so a cell can be
+-- moved by overwriting some of them (mv_cell(v_cell) || jsonb_build_object('state', 'available')).
+CREATE FUNCTION public.mv_cell(p_leg public.movement_legs) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_build_object('at_location_id', p_leg.at_location_id, 'at_transfer_id', p_leg.at_transfer_id,
+                              'at_customer_id', p_leg.at_customer_id, 'at_supplier_id', p_leg.at_supplier_id,
+                              'owner_location_id', p_leg.owner_location_id, 'owner_customer_id', p_leg.owner_customer_id,
+                              'owner_supplier_id', p_leg.owner_supplier_id, 'state', p_leg.state)
+$$;
+
+-- Two legs: p_qty leaves one cell and enters another.
+CREATE FUNCTION public.mv_pair(p_variants_id int8, p_serials_id int4, p_qty int4, p_from jsonb, p_to jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_build_array(
+        p_from || jsonb_build_object('variants_id', p_variants_id, 'serials_id', p_serials_id, 'qty', -p_qty),
+        p_to   || jsonb_build_object('variants_id', p_variants_id, 'serials_id', p_serials_id, 'qty', p_qty))
+$$;
+
+-- The leg that put a unit where it is: its last +1 leg. Null when it has none.
+CREATE FUNCTION public.mv_unit_leg(p_serials_id int4) RETURNS public.movement_legs
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT * FROM movement_legs WHERE serials_id = p_serials_id AND qty = 1 ORDER BY id DESC LIMIT 1
+$$;
+
 -- Event 5, dispatched: (A·A·s) → (r·A·s), the draft's units one by one and the counted lines by quantity.
 -- The module has written its documents and set the remessa 'sent', as 009 expects.
 CREATE FUNCTION public.movement_dispatch(p_transfers_id int8) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-    v_user     int4 := mv_user();
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
     v_transfer transfers%ROWTYPE;
-    v_movement int8;
     v_unit     record;
     v_cell     movement_legs%ROWTYPE;
     v_line     record;
     v_have     int4;
-    v_legs     int4 := 0;
+    v_legs     jsonb := '[]';
     v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id);
 BEGIN
     IF NOT app_at_master() THEN
@@ -176,27 +227,19 @@ BEGIN
         PERFORM mv_refuse('MV018', format('Transfer %s has no expected arrival.', p_transfers_id), v_facts);
     END IF;
 
-    INSERT INTO movements (kind, users_id, ref_type, ref_id)
-    VALUES ('dispatched', v_user, 'transfers', p_transfers_id)
-    RETURNING id INTO v_movement;
-
     -- the units the draft holds, locked in id order; each leaves the cell its last +1 leg put it in
     FOR v_unit IN SELECT s.id, s.variants_id
                     FROM transfer_units tu JOIN serials s ON s.id = tu.serials_id
                    WHERE tu.transfers_id = p_transfers_id
                    ORDER BY s.id FOR UPDATE OF s LOOP
-        SELECT * INTO v_cell FROM movement_legs
-         WHERE serials_id = v_unit.id AND qty = 1 ORDER BY id DESC LIMIT 1;
-        IF NOT FOUND OR v_cell.at_location_id IS DISTINCT FROM v_transfer.location_id
+        v_cell := mv_unit_leg(v_unit.id);
+        IF v_cell.id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_transfer.location_id
                      OR v_cell.owner_location_id IS DISTINCT FROM v_transfer.location_id THEN
             PERFORM mv_refuse('MV014', 'The unit is not in the sender''s stock.',
                               v_facts || jsonb_build_object('serials_id', v_unit.id));
         END IF;
-        INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty,
-                                   at_location_id, at_transfer_id, owner_location_id, state)
-        VALUES (v_movement, v_unit.variants_id, v_unit.id, -1, v_transfer.location_id, NULL, v_transfer.location_id, v_cell.state),
-               (v_movement, v_unit.variants_id, v_unit.id,  1, NULL, p_transfers_id, v_transfer.location_id, v_cell.state);
-        v_legs := v_legs + 2;
+        v_legs := v_legs || mv_pair(v_unit.variants_id, v_unit.id, 1, mv_cell(v_cell),
+                                    mv_cell(v_cell) || jsonb_build_object('at_location_id', NULL, 'at_transfer_id', p_transfers_id));
     END LOOP;
 
     FOR v_line IN SELECT ti.variants_id, SUM(ti.qty)::int4 AS qty, bool_or(i.serial) AS serial, bool_and(i.sellable) AS sellable
@@ -227,26 +270,38 @@ BEGIN
             PERFORM mv_refuse('MV017', format('Only %s in stock to send %s.', v_have, v_line.qty),
                               v_facts || jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have, 'want', v_line.qty));
         END IF;
-        INSERT INTO movement_legs (movements_id, variants_id, qty, at_location_id, at_transfer_id, owner_location_id, state)
-        VALUES (v_movement, v_line.variants_id, -v_line.qty, v_transfer.location_id, NULL, v_transfer.location_id, 'available'),
-               (v_movement, v_line.variants_id,  v_line.qty, NULL, p_transfers_id, v_transfer.location_id, 'available');
-        v_legs := v_legs + 2;
+        v_legs := v_legs || mv_pair(v_line.variants_id, NULL, v_line.qty,
+                                    jsonb_build_object('at_location_id', v_transfer.location_id,
+                                                       'owner_location_id', v_transfer.location_id, 'state', 'available'),
+                                    jsonb_build_object('at_transfer_id', p_transfers_id,
+                                                       'owner_location_id', v_transfer.location_id, 'state', 'available'));
     END LOOP;
 
-    RETURN jsonb_build_object('legs', v_legs);
+    PERFORM mv_post('dispatched', 'transfers', p_transfers_id, v_legs);
+    RETURN jsonb_build_object('legs', jsonb_array_length(v_legs));
 END $$;
 
--- A unit's claim, if it has one: an order line, a remessa draft, the rental fleet (code §3.3).
+-- What holds a unit (code §3.3): a live order line, a remessa draft, the rental fleet, each with its document.
+-- An order's line holds a unit only while a location owns it: once sold, it is the customer's.
+CREATE VIEW public.unit_claims WITH (security_invoker = true) AS
+SELECT sa.serials_id, 'order'::text AS kind, 'orders'::text AS ref_type, o.id::int8 AS ref_id
+  FROM sales sa JOIN orders o ON o.id = sa.orders_id
+ WHERE sa.serials_id IS NOT NULL AND sa.status NOT IN ('cancelled', 'refunded') AND sa.deleted_at IS NULL
+   AND o.status NOT IN ('cancelled', 'refunded', 'voided') AND o.deleted_at IS NULL
+UNION ALL
+SELECT tu.serials_id, 'draft', 'transfers', t.id
+  FROM transfer_units tu JOIN transfers t ON t.id = tu.transfers_id
+ WHERE t.status = 'draft'
+UNION ALL
+SELECT r.serials_id, 'fleet', 'resources', r.id
+  FROM resources r
+ WHERE r.serials_id IS NOT NULL;
+
+-- A unit's claim, if it has one: 'order', 'draft' or 'fleet', in that order.
 CREATE FUNCTION public.mv_unit_claim(p_serials_id int4) RETURNS text
     LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
-    SELECT CASE
-        WHEN EXISTS (SELECT 1 FROM sales sa JOIN orders o ON o.id = sa.orders_id
-                      WHERE sa.serials_id = p_serials_id AND sa.status NOT IN ('cancelled', 'refunded') AND sa.deleted_at IS NULL
-                        AND o.status NOT IN ('cancelled', 'refunded', 'voided') AND o.deleted_at IS NULL) THEN 'order'
-        WHEN EXISTS (SELECT 1 FROM transfer_units tu JOIN transfers t ON t.id = tu.transfers_id
-                      WHERE tu.serials_id = p_serials_id AND t.status = 'draft') THEN 'draft'
-        WHEN EXISTS (SELECT 1 FROM resources r WHERE r.serials_id = p_serials_id) THEN 'fleet'
-    END
+    SELECT kind FROM unit_claims WHERE serials_id = p_serials_id
+     ORDER BY array_position(ARRAY['order', 'draft', 'fleet'], kind) LIMIT 1
 $$;
 
 -- Events 3 and 4, built and back to the bench: the state alone changes, (L·L·validating) ⇄ (L·L·available),
@@ -254,10 +309,9 @@ $$;
 CREATE FUNCTION public.movement_assembly_state(p_serials_id int4, p_assembly_id int8, p_to text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-    v_user     int4 := mv_user();
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
     v_from     text := CASE p_to WHEN 'available' THEN 'validating' ELSE 'available' END;
     v_cell     movement_legs%ROWTYPE;
-    v_movement int8;
     v_claim    text;
     v_facts    jsonb := jsonb_build_object('serials_id', p_serials_id, 'assembly_id', p_assembly_id);
 BEGIN
@@ -268,8 +322,8 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM assembly WHERE id = p_assembly_id AND serials_id = p_serials_id) THEN
         PERFORM mv_refuse('MV021', 'The unit is not this assembly job''s.', v_facts);
     END IF;
-    SELECT * INTO v_cell FROM movement_legs WHERE serials_id = p_serials_id AND qty = 1 ORDER BY id DESC LIMIT 1;
-    IF NOT FOUND OR v_cell.at_location_id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_cell.owner_location_id
+    v_cell := mv_unit_leg(p_serials_id);
+    IF v_cell.id IS NULL OR v_cell.at_location_id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_cell.owner_location_id
        OR v_cell.state <> v_from THEN
         PERFORM mv_refuse(CASE p_to WHEN 'available' THEN 'MV022' ELSE 'MV025' END,
                           CASE p_to WHEN 'available' THEN 'The unit is not on the bench.'
@@ -286,12 +340,9 @@ BEGIN
         END IF;
     END IF;
 
-    INSERT INTO movements (kind, users_id, ref_type, ref_id)
-    VALUES (CASE p_to WHEN 'available' THEN 'built' ELSE 'back_to_bench' END, v_user, 'assembly', p_assembly_id)
-    RETURNING id INTO v_movement;
-    INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, owner_location_id, state)
-    VALUES (v_movement, v_cell.variants_id, p_serials_id, -1, v_cell.at_location_id, v_cell.owner_location_id, v_from),
-           (v_movement, v_cell.variants_id, p_serials_id,  1, v_cell.at_location_id, v_cell.owner_location_id, p_to);
+    PERFORM mv_post(CASE p_to WHEN 'available' THEN 'built' ELSE 'back_to_bench' END, 'assembly', p_assembly_id,
+                    mv_pair(v_cell.variants_id, p_serials_id, 1, mv_cell(v_cell),
+                            mv_cell(v_cell) || jsonb_build_object('state', p_to)));
     RETURN jsonb_build_object('state', p_to);
 END $$;
 
@@ -494,8 +545,8 @@ REVOKE ALL ON public.movements, public.movement_legs, public.positions, public.t
 GRANT SELECT ON public.movements, public.movement_legs, public.positions, public.transfer_units, public.unit_positions,
       public.stock_on_hand, public.stock_sellable, public.owned_elsewhere, public.road_by_transfer, public.stock_total,
       public.movement_check_balance, public.movement_check_chain, public.movement_check_positions,
-      public.movement_check_serial_mix, public.movement_check_roads TO app_staff;
-REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(),
+      public.movement_check_serial_mix, public.movement_check_roads, public.unit_claims TO app_staff;
+REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8),
        public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;

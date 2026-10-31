@@ -12,8 +12,8 @@
  *   t('message.mvRefused_' + error.code, refusalParams(t, error.facts))
  *
  * A key is a prefix and an English word: unitWord_<word>, mvKind_<kind>, planKind_<kind>, unitState_<state>,
- * claim_<kind>, servicePhase_<phase>, trail_<step>, trailSub_<key>, place_<kind>, refType_<type>,
- * conflict_<key>, mvRefused_<code>.
+ * claim_<kind>, servicePhase_<phase>, trail_<step>, trailSub_<key>, story_<kind>, condition_<state>,
+ * place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>.
  * A new locale is a third block with the same keys.
  */
 
@@ -105,6 +105,16 @@ export const movementMessages = {
     planKind_reserved: 'Held by an order',
     planKind_arrival: 'Expected arrival',
 
+    story_purchase: 'Bought · {supplier}',
+    story_assembly_started: 'Assembly started',
+    story_assembly_issue: 'Issue on receipt: {condition}',
+    story_assembly_revised: 'Checked',
+    story_service_opened: 'Service order #{so} opened',
+    story_service_done: 'Service order #{so} done',
+    condition_missing_parts: 'missing parts',
+    condition_damaged: 'damaged',
+    condition_total_loss: 'total loss',
+
     refType_transfers: 'Transfer #{id}',
     refType_assembly: 'Assembly #{id}',
     refType_orders: 'Order #{id}',
@@ -115,6 +125,9 @@ export const movementMessages = {
     refType_stock_counts: 'Count #{id}',
     refType_approvals: 'Approval #{id}',
     refType_movements: 'Movement #{id}',
+    refType_purchases: 'Purchase #{id}',
+    refType_service_orders: 'Service order #{id}',
+    refType_resources: 'Fleet bike #{id}',
 
     conflict_two_plans: 'Two plans at once: {with}',
     conflict_not_there: 'It will not be there: {with}',
@@ -226,6 +239,16 @@ export const movementMessages = {
     planKind_reserved: 'Reservada para um pedido',
     planKind_arrival: 'Chegada prevista',
 
+    story_purchase: 'Comprada · {supplier}',
+    story_assembly_started: 'Montagem iniciada',
+    story_assembly_issue: 'Divergência na recepção: {condition}',
+    story_assembly_revised: 'Revisada',
+    story_service_opened: 'OS #{so} aberta',
+    story_service_done: 'OS #{so} concluída',
+    condition_missing_parts: 'faltam peças',
+    condition_damaged: 'avariada',
+    condition_total_loss: 'perda total',
+
     refType_transfers: 'Remessa #{id}',
     refType_assembly: 'Montagem #{id}',
     refType_orders: 'Pedido #{id}',
@@ -236,6 +259,9 @@ export const movementMessages = {
     refType_stock_counts: 'Inventário #{id}',
     refType_approvals: 'Aprovação #{id}',
     refType_movements: 'Movimento #{id}',
+    refType_purchases: 'Compra #{id}',
+    refType_service_orders: 'OS #{id}',
+    refType_resources: 'Moto da frota #{id}',
 
     conflict_two_plans: 'Dois planos ao mesmo tempo: {with}',
     conflict_not_there: 'A moto não estará lá: {with}',

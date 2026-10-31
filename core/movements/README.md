@@ -17,17 +17,21 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 | `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()`, `movementBuilt()`, `movementBackToBench()` | C |
 | `positions.php` | the reading side at now: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | C |
 | `cube.php` | the cube's door (`CONSUMERS.md`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, `cubeConflicts()` | B |
+| `units.php` | the kernel of a unit (`CONTRACT.md`): `unitWord()`, `servicePhase()`, `unitRows()` (the Unit), `stockUnitsList()` (a location's units), `placeWhere()` | C |
+| `journal.php` | `movementsList()`: the movements as one location sees them, with the documents' process lines, and one model's running balance | C |
+| `trajectory.php` | `unitTrajectory()`: a unit's whole life, the line, its facts, the trail and the story | C |
 | `i18n/movements.js` | the layer's words, en and pt, for every module's i18n: the units' words, the movement kinds, the places, the refusals | C |
 | `CONTRACT.md` | who reads and who writes: inventory-master's functions and the four core kernels, mapped to the layer, with the shapes in and out and the differences from today, explained | C |
-| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
+| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, the posting primitive `mv_post()` with `mv_cell()`, `mv_pair()` and `mv_unit_leg()`, `unit_claims` and `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
 | `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `unit_waypoints`, `unit_waypoint_conflicts`, `cube_dots()` (one parameter per axis) | B |
+| `sql/readers.sql` | what the kernels read in one statement: `movement_rows(location)`, the journal as one location sees it | C |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
 | `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
-| `tests/dispatch-test.sql` | 17 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards: the dispatch, the reads, the health checks, and each refusal of built and back to the bench | |
+| `tests/dispatch-test.sql` | 18 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards: the dispatch, the reads, the health checks, each refusal of built and back to the bench, and a movement that does not balance | |
 | `tests/cube-test.sql` | 14 cases on the time axis: the stays, a cut along each axis in both clocks, an instant, the encounters, the road's forward end, and the rules that keep one place at a time | |
-| `tests/core-test.php` | 28 cases through PHP: the door, the readers, and the cube's every angle, its dots and its actions | |
+| `tests/core-test.php` | 40 cases through PHP: the door, the readers, the cube's every angle, its dots and its actions, and the kernels | |
 
-Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, then `php tests/core-test.php path/to/vendor/autoload.php`.
+Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, then `php tests/core-test.php path/to/vendor/autoload.php`.
 
 ## The draft's ERP controls, in the layer
 - **Health checks**, the draft's `v_recon_*`: `movement_check_balance`, `_chain`, `_positions`, `_serial_mix` and `_roads`. Each must answer nothing, and anything found is fixed by posting a movement.
@@ -63,9 +67,10 @@ As the data stands, the opening's guard (code §3.4.1) would refuse: each of its
 2. The user comes from the session: `mv_user()` refuses an empty `app.user`.
 3. The guards come first. Each refusal goes through `mv_refuse(code, message, facts)`, which raises SQLSTATE `MV0nn` and one `mv:` line of DETAIL. The message is English, for the log. The code is the i18n key (`mvRefused_<code>`, `i18n/movements.js`) and the facts are its parameters: no words for people leave the database.
 4. Locks: units FOR UPDATE in id order; counted goods take `pg_advisory_xact_lock(0, variant)`, then `(location, variant)`, as 009 does.
-5. A unit leaves the cell its last +1 leg put it in.
-6. Lists come in as jsonb, and the answer goes out as jsonb.
-7. EXECUTE is revoked from PUBLIC and granted to `app_staff`.
+5. A unit leaves the cell its last +1 leg put it in (`mv_unit_leg()`).
+6. **One door into the journal:** the guards build the legs (`mv_pair()` over `mv_cell()`), then one call to `mv_post(kind, ref, legs)` writes the movement and its legs together. `mv_post` refuses legs that do not balance per model (MV003). Nothing else writes the journal.
+7. Lists come in as jsonb, and the answer goes out as jsonb.
+8. EXECUTE is revoked from PUBLIC and granted to `app_staff`; `mv_post` is granted to no one.
 
 ## The PHP door keeps these
 `movementCall()` keeps each of them:

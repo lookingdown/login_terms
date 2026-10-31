@@ -72,7 +72,7 @@ people are `unitWord_<key>` in the i18n (Pronta, Ready, …).
 | `rented` | with a customer, still the location's, by a rental | rental |
 | `loaned` | the same, by a loan | loan |
 | `provider` | at its supplier | returned, in part |
-| `workshop` | an open service order, whatever its cell, until step F makes the workshop a place | warranty |
+| `workshop` | an open service order whose day has come (scheduled today or before), whatever its cell, until step F makes the workshop a place | warranty |
 | `written_off` | written off | written_off, scrapped |
 | `unknown` | no position yet | unknown |
 
@@ -144,7 +144,7 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | `serialState($row)` | `unitWord($position, $claim, $bench, $service, $earmark)` | the Word's key |
 | `stockUnitsList($pdo, $in, $location, $whereLabel)` | `stockUnitsList($pdo, $in, $location)`, on the layer | Units with `purchase`, `cost` and `price`; a page with `scope`, `scopeTotal` and `counts` per word |
 | `unitTimeline($id)` | `unitTrajectory($pdo, $id)` | `unit`, `facts`, `trail`, `line` and `events` (below) |
-| `movementLog` and `movementLogCsv` | `movementsList($pdo, $in, $location)` and `movementsCsv` | movement rows; a page with `kinds`, the keys |
+| `movementLog` and `movementLogCsv` | `movementsList($pdo, $in, $location)`. The spreadsheet is the screen's, built from these rows in its own words | movement rows; a page with `kinds`, the keys |
 
 - **`stockUnitsList`'s scope:**
   - `current`: standing at the location, or its own anywhere (on a road from it, out on a rental), or on a road to it
@@ -160,9 +160,11 @@ One movement as one location sees it. Movimentações and a model's last moves a
     - `sub`: what the current step waits for, as a key and its parameters: `on_bench`, `waiting_assembly`,
       `earmarked` (with the shop's name), `waiting_shop` or `for_sale`; its words are `trailSub_<key>`
   - `line`: the cube's dots for the unit, facts then plans
-  - `events`: the story, `[{at, kind, ref, params}]`. Each fact on the line is an event, titled `mvKind_<kind>`.
-    The documents' chapters sit beside them in time order, titled `story_<kind>`: the purchase, the assembly job's
-    stages, a rental out and back with its km, the service orders. Their words come with `unitTrajectory`'s code.
+  - `events`: the story, `[{at, source, kind, ref, params}]`, in time order. A fact on the line has `source`
+    `movement`, its `kind` titled `mvKind_<kind>` and its `ref` the movement's document. A document's chapter has
+    `source` `document`, titled `story_<kind>`: the purchase, the assembly job started, an issue on receipt (its
+    `condition` a key, `condition_<state>`), the job checked, a service order opened and done. A rental is told by
+    its movements.
 
 ## The readers
 

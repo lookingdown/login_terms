@@ -94,6 +94,9 @@ SELECT movement_built(504, 81);
 SELECT set_config('app.location', '1', false) \g /dev/null
 \echo '== 16. bike 501 back to the bench: order 900 holds it. Expect MV024.'
 SELECT movement_back_to_bench(501, 82);
-\echo '== 17. an empty app.user. Expect MV001.'
+\echo '== 17. a movement whose legs do not balance, posted by hand. Expect MV003, and nothing written.'
+SELECT mv_post('adjusted', NULL, NULL, '[{"variants_id": 200, "qty": 1, "at_location_id": 1, "owner_location_id": 1, "state": "available"}]');
+SELECT count(*) AS adjustments FROM movements WHERE kind = 'adjusted';
+\echo '== 18. an empty app.user. Expect MV001.'
 SELECT set_config('app.user', '', false) \g /dev/null
 SELECT movement_dispatch(56);

@@ -130,3 +130,43 @@ check('its line: the opening, built, back to the bench', array_column($line, 'wh
 $since = $line[1]['starts'];
 check('from the build on: both events in the period, one cell at the moment', count(cube($pdo, ['unit' => 504, 'between' => [$since, null]])) === 2
     && count(cube($pdo, ['unit' => 504, 'at' => $since])) === 1);
+
+// the kernels (units.php, journal.php, trajectory.php): the shapes of CONTRACT.md
+$at = fn (string $place, string $state, string $why = 'opening', string $owner = '') => ['place' => $place, 'owner' => $owner ?: $place, 'state' => $state, 'why' => $why];
+$words = [
+    unitWord(null),
+    unitWord($at('location:1', 'validating'), null, ['stage' => 'in_process']),
+    unitWord($at('location:1', 'available'), ['kind' => 'draft']),
+    unitWord($at('location:1', 'available'), null, null, null, ['location_id' => 2]),
+    unitWord($at('road:55', 'available', 'dispatched', 'location:1')),
+    unitWord($at('location:2', 'available', 'sold', 'customer:7')),
+    unitWord($at('customer:7', 'available', 'loaned', 'location:1')),
+    unitWord($at('customer:7', 'available', 'sold', 'customer:7'), null, null, ['phase' => 'in_work']),
+];
+check('the word: nothing, the bench, a draft, an earmark, the road, sold, a loan, the workshop', $words === ['unknown', 'assembling', 'held', 'assigned', 'transit', 'sold', 'loaned', 'workshop'], $words);
+check('a service order: received, being worked on, finished, closed', [servicePhase('pending'), servicePhase('waiting_parts'), servicePhase('ready'), servicePhase('completed')] === ['received', 'in_work', 'finished', null]);
+
+$units = array_column(unitRows($pdo, [500, 501, 502, 503, 504, 999999], ['purchase', 'cost', 'price']), null, 'id');
+check('the units, each in its word: two on the road, one on an order, one in the fleet, one on the bench', array_map(fn ($u) => $u['word'], $units)
+    === [500 => 'transit', 501 => 'reserved', 502 => 'fleet', 503 => 'transit', 504 => 'assembling'], array_map(fn ($u) => $u['word'], $units));
+check('a unit on the road says where to, by keys and names', $units[500]['position']['where'] === ['key' => 'road', 'params' => ['to' => 'Prudente', 'transfers_id' => 55]]
+    && $units[501]['claim'] === ['kind' => 'order', 'ref' => ['type' => 'orders', 'id' => 900]] && $units[504]['bench']['assembly_id'] === 81, [$units[500]['position']['where'], $units[501]['claim']]);
+check('typed values: ids and prices are numbers', is_int($units[500]['model']['variants_id']) && is_float($units[500]['price']));
+
+$master = stockUnitsList($pdo, [], 1);
+check('the master\'s units: five, counted per word', $master['meta']['scopeTotal'] === 5 && $master['meta']['counts'] == ['transit' => 2, 'reserved' => 1, 'fleet' => 1, 'assembling' => 1], $master['meta']['counts']);
+check('one word of them: the two on the road', stockUnitsList($pdo, ['word' => 'transit'], 1)['meta']['totalRows'] === 2);
+check('Prudente\'s units: the two coming to it', array_column(stockUnitsList($pdo, [], 2)['data'], 'id') == [503, 500], array_column(stockUnitsList($pdo, [], 2)['data'], 'id'));
+
+$log = movementsList($pdo, ['serial_id' => 503], 1);
+check('a unit in the master\'s movements: dispatched (−1), after its opening (+1)', array_map(fn ($r) => [$r['kind'], $r['qty']], $log['data']) === [['dispatched', -1], ['opening', 1]],
+    array_map(fn ($r) => [$r['kind'], $r['qty']], $log['data']));
+check('a movement row\'s cells are coordinates, with their names beside', $log['data'][0]['from'] === ['place' => 'location:1', 'owner' => 'location:1', 'state' => 'available']
+    && $log['data'][0]['to']['place'] === 'road:' . $transferId && $log['data'][0]['names']['road:' . $transferId] === 'Prudente', $log['data'][0]);
+$helmets = movementsList($pdo, ['variants_id' => 200], 1)['data'];
+check('one model alone carries its balance: the master\'s helmets, 5 − 2 − 1', $helmets[0]['balance'] === 2 && end($helmets)['balance'] === 5, array_column($helmets, 'balance'));
+
+$life = unitTrajectory($pdo, 504);
+check('its whole life: the line, the trail, the story', array_column(array_filter($life['line'], fn ($d) => $d['layer'] === 'fact'), 'why') === ['opening', 'built', 'back_to_bench']
+    && array_column($life['trail'], 'state', 'key')['central'] === 'done'
+    && in_array('assembly_started', array_column($life['events'], 'kind'), true), [array_column($life['trail'], 'state', 'key'), array_column($life['events'], 'kind')]);
