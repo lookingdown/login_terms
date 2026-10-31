@@ -27,6 +27,8 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 | `sql/readers.sql` | what the kernels read in one statement: `movement_rows(location)`, the journal as one location sees it | C |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
 | `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
+| `sql/opening.sql` | the opening, the first half of migration 028: `opening()` runs the guard (`opening_guard()`, the five discrepancy classes), the port (`opening_port()`, every unit's story into its legs, the counted balances) and the proof (`opening_proof()`, every unit and balance where today's tables put it), in one transaction. Refusals: MV900 (the guard), MV901 (the proof). It does nothing once the journal has movements | C |
+| `sql/retire.sql` | the second half: the old state retired in one statement (the ledger archived as `stock_archive`, `serial_events` read-only, `serials.status`, `location_id` and `transfers_id` and `variants.stock` dropped, the low-stock alert moved to `positions` on sellable, the application left writing a unit's identity alone). MV902 before the opening; nothing once done | C |
 | `tests/dispatch-test.sql` | 18 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards: the dispatch, the reads, the health checks, each refusal of built and back to the bench, and a movement that does not balance | |
 | `tests/cube-test.sql` | 14 cases on the time axis: the stays, a cut along each axis in both clocks, an instant, the encounters, the road's forward end, and the rules that keep one place at a time | |
 | `tests/core-test.php` | 69 cases through PHP: the door, the readers, the cube's every angle, its dots and its actions, the kernels, and a receipt, an arrival, a sale, a write-off, an adjustment, a rental, a loan, a quick transfer, a count, a correction and a removal undone after; the model lines, the organisation's units and a unit's actions | |
@@ -36,8 +38,9 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 | `tests/claims-test.sql` | 18 cases: a draft's hold and release, the attach on an unpaid and on a paid order, the fleet's claim, a write-off and a return to the provider; each refusal; the health checks. Run after road-test.sql | |
 | `tests/stock-test.sql` | 39 cases: a quick transfer there and onward; a rental and a loan out and back, each once; adjustments by difference and by balance, one model and two; a count closed, then again; a seat that writes only through the functions; each refusal; the health checks. Run after claims-test.sql | |
 | `tests/correct-test.sql` | 23 cases: a unit that is nothing yet removed and its number received again; the supervisor's corrections: a written-off bike found, a unit "a mais" at a shop, a rental bike back unrecorded; a remessa swapped after it arrived; one the master sends from a shop; each refusal; the health checks. Run after stock-test.sql | |
+| `tests/opening-test.sql` | 14 cases on a scratch copy of its own: today's tables with a small history in their shapes, refused by the guard, by the proof, and the retirement before the opening; then opened, proven, opened again (nothing), retired, a receipt and a low-stock alert after it, retired again (nothing) | |
 
-Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, `php tests/core-test.php path/to/vendor/autoload.php`, `tests/receive-test.sql`, `tests/sale-test.sql`, `tests/road-test.sql`, `tests/claims-test.sql`, `tests/stock-test.sql`, then `tests/correct-test.sql`.
+Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, `php tests/core-test.php path/to/vendor/autoload.php`, `tests/receive-test.sql`, `tests/sale-test.sql`, `tests/road-test.sql`, `tests/claims-test.sql`, `tests/stock-test.sql`, then `tests/correct-test.sql`. The opening has a copy of its own: `sql/layer.sql`, `sql/cube.sql`, `sql/readers.sql`, `sql/opening.sql`, then `tests/opening-test.sql` (it runs `sql/retire.sql`).
 
 ## The draft's ERP controls, in the layer
 - **Health checks**, the draft's `v_recon_*`: `movement_check_balance`, `_chain`, `_positions`, `_serial_mix` and `_roads`. Each must answer nothing, and anything found is fixed by posting a movement.
@@ -58,13 +61,30 @@ Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`,
 | D5 a unit sold on no live line | 1 | unit 61 |
 | D6 a chassis twice | 5 pairs | each is a clean chassis and a copy ending in ".": a returned bike sold again under a second identity, which breaks the draft's "one serial, one trajectory" |
 | D7 a bike sold on a line with no unit | 28 | |
-| D8 a remessa bike line that carried no unit | 29 | every bike line of remessas 1–28 |
+| D8 a remessa bike line that carried no unit | 2 | remessa 23 (one bike: D2's) and remessa 28 (four bikes of one model). **Corrected on 31 Oct:** this said 29, every bike line of remessas 1–28, because the check read the remessa from the event's transfer columns; the seeded history keeps it in the event's ref |
 | D9 a unit whose story does not end where it stands | 1 | unit 110: its row says CDV, its last event the master |
 | D10 a unit in transit on a remessa that is not on the road | 0 | |
 
 The legacy statuses in use are sold 78, stock 12, assembly 4 and returned 4. No unit is in `warranty` or `transferred`, so the opening needs no rule for them.
 
-As the data stands, the opening's guard (code §3.4.1) would refuse: each of its five classes has rows. They are the client's to settle (rule §0.2).
+As the data stands, the opening's guard (code §3.4.1) refuses: each of its five classes has rows (19, 1, 28 sale lines and 2 remessa lines, 1 and 5 pairs). They are the client's to settle (rule §0.2).
+
+## The opening, rehearsed on the dump of 30 October
+`opening_port()` and `opening_proof()` run on their own, in a transaction rolled back after, show what the opening would do once the guard is clear:
+
+- **It ports all 98 units in 345 steps, and the 12 counted balances.** Every health check is 0, and every balance is today's.
+- **Two units do not end where today's tables say:**
+  - unit 61, sold on no live line (the guard's own row);
+  - unit 110, whose history ends at the master while its row says CDV (D9).
+  The proof would refuse on both until the client settles them.
+- **The port's rules, where the history is silent:**
+  - A unit with only the move's snapshot (a seed) opens there, at the seed's time or its first sale's, whichever is first.
+  - A bike on the bench is built at its card's `stocked_at`, no later than the step it goes on by.
+  - A sale is the customer's once paid and attached, whichever is last. A bike sold before it reached the shop is sold on its arrival there.
+  - A refunded sale is undone at its own moment, since no refund is dated, and comes before the unit's live sale.
+  - A sale paid on a completed order is in the customer's hands.
+  - Every ported movement is recorded at the opening, so the second clock tells the port apart from what came after.
+- **`retire.sql` in the same transaction drops the old state whole.** After it, a receipt mints a unit with its identity alone, and the low-stock alert opens on sellable.
 
 ## Every event function keeps these rules
 `movement_dispatch`, `movement_built`, `movement_back_to_bench`, `movement_receive`, `movement_arrive`, the sale path's four, the remessa's three corrections, the claims, the baixa, the quick transfer, the rentals and the loans, the adjustment and the count, the correction and the removal keep each of them:

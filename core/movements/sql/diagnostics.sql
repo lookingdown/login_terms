@@ -66,14 +66,15 @@ SELECT st.id AS stock_id, st.location_id, st.variants_id, st.qty, sa.id AS sales
  ORDER BY 1;
 
 \echo '== D8. a remessa line of bikes without the units it carried (class 3 on the road). A unit leaves'
-\echo '        serials.transfers_id on arrival, so the trip is read from serial_events'
+\echo '        serials.transfers_id on arrival, so the trip is read from serial_events: its remessa is on the'
+\echo '        event (transfers_id, from_transfers_id) or, in the seeded history, its ref'
 SELECT ti.transfers_id, t.status, ti.variants_id, SUM(ti.qty) AS line_qty, COALESCE(MAX(u.units), 0) AS units_that_travelled
   FROM transfer_items ti
   JOIN transfers t ON t.id = ti.transfers_id
   JOIN variants v ON v.id = ti.variants_id JOIN items i ON i.id = v.items_id
   LEFT JOIN LATERAL (SELECT count(DISTINCT e.serials_id) AS units FROM serial_events e
-                      WHERE e.variants_id = ti.variants_id
-                        AND (e.transfers_id = ti.transfers_id OR e.from_transfers_id = ti.transfers_id)) u ON true
+                      WHERE e.variants_id = ti.variants_id AND e.event IN ('dispatched', 'arrived')
+                        AND COALESCE(e.transfers_id, e.from_transfers_id, CASE WHEN e.ref_type = 'transfers' THEN e.ref_id END) = ti.transfers_id) u ON true
  WHERE i.serial AND t.status IN ('sent', 'received')
  GROUP BY ti.transfers_id, t.status, ti.variants_id
 HAVING SUM(ti.qty) <> COALESCE(MAX(u.units), 0)

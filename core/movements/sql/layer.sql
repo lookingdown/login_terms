@@ -434,9 +434,10 @@ BEGIN
                                       v_facts || jsonb_build_object('serial_number', v_number, 'serials_id', v_taken));
                 END IF;
             END IF;
-            INSERT INTO serials (variants_id, serial_number, observations, created_at, purchase_items_id, location_id)
+            -- the identity only: where it stands is its leg's (retire.sql drops serials.location_id)
+            INSERT INTO serials (variants_id, serial_number, observations, created_at, purchase_items_id)
             VALUES (v_line.variants_id, v_number, NULLIF(trim(p_numbers -> (i - 1) ->> 'observations'), ''),
-                    date_trunc('second', LOCALTIMESTAMP), p_line, v_here)
+                    date_trunc('second', LOCALTIMESTAMP), p_line)
             RETURNING id INTO v_unit;
             v_units := v_units || v_unit;
             v_legs := v_legs || mv_pair(v_line.variants_id, v_unit, 1, v_from,
