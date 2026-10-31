@@ -132,3 +132,48 @@ function movementArrive(PDO $pdo, int $transferId, int $shopLineId, int $newRece
                                                   [array_values(array_map('intval', $units)), 'jsonb']]);
 }
 
+/**
+ * Event 11, sold: each line of the paid order that has its unit becomes the customer's; counted goods leave the
+ * stock. Run it when the order is paid and again after a late attach: it sells only what is not sold yet, and
+ * stamps each line's cost. `waiting`: the bike lines still without their unit.
+ *
+ * @return array{sold: list<int>, waiting: list<int>}
+ */
+function movementSell(PDO $pdo, int $orderId): array
+{
+    return movementCall($pdo, 'movement_sell', [[$orderId, 'bigint']]);
+}
+
+/**
+ * Event 12, handed over: every sold unit of the paid order is with its customer now. Refused while a bike line has
+ * no unit. At the till it follows movementSell() in the same transaction.
+ *
+ * @return array{handed_over: list<int>}
+ */
+function movementHandOver(PDO $pdo, int $orderId): array
+{
+    return movementCall($pdo, 'movement_hand_over', [[$orderId, 'bigint']]);
+}
+
+/**
+ * Event 13, the sale of one line undone (a void, a cancel, a refund before the handover). $why: the reason, as the
+ * module words it. A handed-over unit is returned instead.
+ *
+ * @return array{undone: int}
+ */
+function movementUnsell(PDO $pdo, int $saleId, ?string $why = null): array
+{
+    return movementCall($pdo, 'movement_unsell', [[$saleId, 'bigint'], [$why, 'text']]);
+}
+
+/**
+ * Event 14, returned after the handover, by the order's customer, to the order's location: a unit, or $qty of a
+ * line's counted goods (up to what it has out). $why: the reason, as the module words it.
+ *
+ * @return array{returned: int}
+ */
+function movementReturn(PDO $pdo, int $saleId, int $qty = 1, ?string $why = null): array
+{
+    return movementCall($pdo, 'movement_return', [[$saleId, 'bigint'], [$qty, 'integer'], [$why, 'text']]);
+}
+

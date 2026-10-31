@@ -189,3 +189,22 @@ check('a remessa\'s bike arrived: Prudente\'s now, its two helmets still on the 
     && cubeDot($pdo, ['unit' => 500])['owner'] === 'location:2', $came);
 $pdo->rollBack();
 check('undone: bike 500 back on its road, the line as it was', cubeDot($pdo, ['unit' => 500])['place'] === 'road:55');
+
+// the sale path (ledger.php), in a transaction undone after: order 900 paid, sold, handed over
+$pdo->beginTransaction();
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$pdo->exec("UPDATE orders SET paid = true, status = 'paid', customers_id = 7 WHERE id = 900");
+$pdo->exec("SET LOCAL session_replication_role = origin");
+$sold = movementSell($pdo, 900);
+$word = fn () => unitRows($pdo, [501])[0]['word'];
+check('a paid order sold: bike 501 its customer\'s, still at the shop', count($sold['sold']) === 1 && $word() === 'sold', [$sold, $word()]);
+$handed = movementHandOver($pdo, 900);
+check('handed over: with its customer now', count($handed['handed_over']) === 1 && $word() === 'delivered', [$handed, $word()]);
+try {
+    movementUnsell($pdo, $sold['sold'][0], 'cancel');
+    check('a handed-over sale is not undone', false);
+} catch (MovementRefused $e) {
+    check('a handed-over sale is not undone: it is returned', $e->sqlState === 'MV061', $e->sqlState);
+}
+$pdo->rollBack();
+check('undone: bike 501 on its order again, not sold', $word() === 'reserved');

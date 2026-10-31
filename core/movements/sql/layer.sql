@@ -579,6 +579,261 @@ BEGIN
                               'on_road', (SELECT COALESCE(SUM(qty), 0) FROM positions WHERE at_transfer_id = p_transfers_id));
 END $$;
 
+-- What a unit or a model cost a location, from its receipt there: a remessa's price if it arrived by remessa, else
+-- its purchase line's landed cost (the invoice cost while the landing is not computed). Counted goods: the latest
+-- receipt or arrival of the model at the location. A unit from before the layer: its purchase line.
+CREATE FUNCTION public.mv_cost(p_variants_id int8, p_serials_id int4, p_location int4) RETURNS numeric
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT price FROM (
+        SELECT CASE WHEN m.kind = 'arrived' THEN ti.unit_price
+                    ELSE COALESCE(NULLIF(pi.landed_unit_cost, 0), pi.unit_cost) END AS price, m.occurred_at AS at, l.id
+          FROM movement_legs l
+          JOIN movements m ON m.id = l.movements_id AND m.kind IN ('received', 'arrived')
+          LEFT JOIN transfer_items ti ON m.kind = 'arrived' AND ti.transfers_id = m.ref_id AND ti.variants_id = l.variants_id
+          LEFT JOIN purchase_items pi ON m.kind = 'received' AND pi.id = m.ref_id
+         WHERE l.qty > 0 AND l.at_location_id = p_location AND l.variants_id = p_variants_id
+           AND (p_serials_id IS NULL OR l.serials_id = p_serials_id)
+        UNION ALL
+        SELECT COALESCE(NULLIF(pi.landed_unit_cost, 0), pi.unit_cost), NULL, NULL
+          FROM serials s JOIN purchase_items pi ON pi.id = s.purchase_items_id
+         WHERE s.id = p_serials_id) c
+     ORDER BY at DESC NULLS LAST, id DESC NULLS LAST
+     LIMIT 1
+$$;
+
+-- Whether an order line is sold now: its last sale or undoing is a sale. A return gives goods back; it does not
+-- undo the line.
+CREATE FUNCTION public.mv_line_sold(p_sales_id int8) RETURNS boolean
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT COALESCE((SELECT kind = 'sold' FROM movements
+                      WHERE ref_type = 'sales' AND ref_id = p_sales_id AND kind IN ('sold', 'sale_undone')
+                      ORDER BY id DESC LIMIT 1), false)
+$$;
+
+-- What a counted line has out of its location now: sold, less what came back.
+CREATE FUNCTION public.mv_line_out(p_sales_id int8, p_location int4) RETURNS int4
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT COALESCE(-SUM(l.qty), 0)::int4
+      FROM movements m JOIN movement_legs l ON l.movements_id = m.id
+     WHERE m.ref_type = 'sales' AND m.ref_id = p_sales_id AND m.kind IN ('sold', 'returned', 'sale_undone')
+       AND l.at_location_id = p_location AND l.owner_location_id = p_location
+$$;
+
+-- An order as the sale path reads it, locked, with its guards: found (MV050), at the session's location or the
+-- master's (MV052), and, unless p_any, paid in full and alive (MV051).
+CREATE FUNCTION public.mv_order(p_orders_id int8, p_paid boolean DEFAULT true) RETURNS public.orders
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_order orders%ROWTYPE;
+    v_facts jsonb := jsonb_build_object('orders_id', p_orders_id);
+BEGIN
+    SELECT * INTO v_order FROM orders WHERE id = p_orders_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV050', 'Order not found.', v_facts);
+    END IF;
+    IF NOT (app_at_master() OR app_location() = v_order.location_id) THEN
+        PERFORM mv_refuse('MV052', 'The order is another location''s.', v_facts || jsonb_build_object('location_id', v_order.location_id));
+    END IF;
+    IF p_paid AND (v_order.paid IS NOT TRUE OR v_order.status IN ('cancelled', 'refunded', 'voided') OR v_order.deleted_at IS NOT NULL) THEN
+        PERFORM mv_refuse('MV051', 'The order is not paid in full.', v_facts);
+    END IF;
+    RETURN v_order;
+END $$;
+
+-- Event 11, sold: (L·L·available) → (L·c·available) for each line of a paid order that has its unit, c the order's
+-- customer; counted goods leave to the books (they are not followed into the customer's hands). A bike becomes the
+-- customer's when its line is paid in full and its unit attached, whichever comes last: so this runs when the order
+-- is paid and again after a late attach, and sells only what is not sold yet. It stamps each line's cost
+-- (sales.unit_cost). A line without its unit waits: it is answered in `waiting`.
+CREATE FUNCTION public.movement_sell(p_orders_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user    int4 := mv_user();   -- an empty session is refused before anything else
+    v_order   orders%ROWTYPE := mv_order(p_orders_id);
+    v_here    int4 := v_order.location_id;
+    v_line    record;
+    v_cell    movement_legs%ROWTYPE;
+    v_have    int4;
+    v_sold    int8[] := '{}';
+    v_waiting int8[] := '{}';
+    v_facts   jsonb := jsonb_build_object('orders_id', p_orders_id);
+BEGIN
+    FOR v_line IN SELECT sa.id, sa.variants_id, sa.serials_id, sa.quantity::int4 AS qty, i.serial, i.sellable
+                    FROM sales sa JOIN variants v ON v.id = sa.variants_id JOIN items i ON i.id = v.items_id
+                   WHERE sa.orders_id = p_orders_id AND sa.deleted_at IS NULL AND sa.status NOT IN ('cancelled', 'refunded')
+                   ORDER BY sa.id FOR UPDATE OF sa LOOP
+        CONTINUE WHEN mv_line_sold(v_line.id);
+        IF NOT v_line.sellable THEN
+            PERFORM mv_refuse('MV015', 'Materials do not move through the ledger.', v_facts || jsonb_build_object('variants_id', v_line.variants_id));
+        END IF;
+        IF v_line.serial THEN
+            IF v_line.serials_id IS NULL THEN
+                v_waiting := v_waiting || v_line.id;
+                CONTINUE;
+            END IF;
+            IF v_order.customers_id IS NULL THEN
+                PERFORM mv_refuse('MV053', 'A bike is sold to a customer: the order names none.', v_facts || jsonb_build_object('sales_id', v_line.id));
+            END IF;
+            PERFORM 1 FROM serials WHERE id = v_line.serials_id FOR UPDATE;
+            v_cell := mv_unit_leg(v_line.serials_id);
+            IF v_cell.id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_here OR v_cell.owner_location_id IS DISTINCT FROM v_here
+               OR v_cell.state <> 'available' THEN
+                PERFORM mv_refuse('MV054', 'The unit is not available where the order is.',
+                                  v_facts || jsonb_build_object('serials_id', v_line.serials_id, 'state', v_cell.state));
+            END IF;
+            IF EXISTS (SELECT 1 FROM unit_claims c WHERE c.serials_id = v_line.serials_id
+                          AND NOT (c.kind = 'order' AND c.ref_id = p_orders_id)) THEN
+                PERFORM mv_refuse('MV055', 'The unit is held by something else.',
+                                  v_facts || jsonb_build_object('serials_id', v_line.serials_id, 'claim', mv_unit_claim(v_line.serials_id)));
+            END IF;
+            PERFORM mv_post('sold', 'sales', v_line.id,
+                            mv_pair(v_line.variants_id, v_line.serials_id, 1, mv_cell(v_cell),
+                                    mv_cell(v_cell) || jsonb_build_object('owner_location_id', NULL, 'owner_customer_id', v_order.customers_id)));
+        ELSE
+            PERFORM pg_advisory_xact_lock(v_here, v_line.variants_id::int4);
+            SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+             WHERE variants_id = v_line.variants_id AND state = 'available' AND at_location_id = v_here AND owner_location_id = v_here;
+            IF v_have < v_line.qty THEN
+                PERFORM mv_refuse('MV056', format('Only %s in stock to sell %s.', v_have, v_line.qty),
+                                  v_facts || jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have, 'want', v_line.qty));
+            END IF;
+            PERFORM mv_post('sold', 'sales', v_line.id,
+                            mv_pair(v_line.variants_id, NULL, v_line.qty,
+                                    jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available'),
+                                    jsonb_build_object('state', 'available')));
+        END IF;
+        UPDATE sales SET unit_cost = mv_cost(v_line.variants_id, v_line.serials_id, v_here) WHERE id = v_line.id;
+        v_sold := v_sold || v_line.id;
+    END LOOP;
+    RETURN jsonb_build_object('sold', to_jsonb(v_sold), 'waiting', to_jsonb(v_waiting));
+END $$;
+
+-- Event 12, handed over: (L·c·s) → (c·c·s), every sold unit of a paid order, at the counter or sent to the customer.
+-- No handover while a bike line of the order has no unit (MV057). Counted goods left at the sale.
+CREATE FUNCTION public.movement_hand_over(p_orders_id int8) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user   int4 := mv_user();   -- an empty session is refused before anything else
+    v_order  orders%ROWTYPE := mv_order(p_orders_id);
+    v_line   record;
+    v_cell   movement_legs%ROWTYPE;
+    v_done   int8[] := '{}';
+    v_facts  jsonb := jsonb_build_object('orders_id', p_orders_id);
+BEGIN
+    FOR v_line IN SELECT sa.id, sa.variants_id, sa.serials_id
+                    FROM sales sa JOIN variants v ON v.id = sa.variants_id JOIN items i ON i.id = v.items_id
+                   WHERE sa.orders_id = p_orders_id AND sa.deleted_at IS NULL AND sa.status NOT IN ('cancelled', 'refunded')
+                     AND i.serial
+                   ORDER BY sa.id FOR UPDATE OF sa LOOP
+        IF v_line.serials_id IS NULL THEN
+            PERFORM mv_refuse('MV057', 'A bike line has no unit: no handover without it.', v_facts || jsonb_build_object('sales_id', v_line.id));
+        END IF;
+        PERFORM 1 FROM serials WHERE id = v_line.serials_id FOR UPDATE;
+        v_cell := mv_unit_leg(v_line.serials_id);
+        CONTINUE WHEN v_cell.at_customer_id IS NOT NULL AND v_cell.at_customer_id = v_order.customers_id;   -- with them already
+        IF NOT mv_line_sold(v_line.id) OR v_cell.at_location_id IS NULL OR v_cell.owner_customer_id IS DISTINCT FROM v_order.customers_id THEN
+            PERFORM mv_refuse('MV058', 'The unit is not sold on this order.', v_facts || jsonb_build_object('sales_id', v_line.id, 'serials_id', v_line.serials_id));
+        END IF;
+        PERFORM mv_post('handed_over', 'sales', v_line.id,
+                        mv_pair(v_line.variants_id, v_line.serials_id, 1, mv_cell(v_cell),
+                                mv_cell(v_cell) || jsonb_build_object('at_location_id', NULL, 'at_customer_id', v_order.customers_id)));
+        v_done := v_done || v_line.id;
+    END LOOP;
+    RETURN jsonb_build_object('handed_over', to_jsonb(v_done));
+END $$;
+
+-- An order line as undoing and returning read it, locked: found (MV059), its order's guards (mv_order, paid or not).
+CREATE FUNCTION public.mv_order_line(p_sales_id int8) RETURNS record
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_line record;
+BEGIN
+    SELECT sa.id, sa.orders_id, sa.variants_id, sa.serials_id, sa.quantity::int4 AS qty, i.serial
+      INTO v_line
+      FROM sales sa JOIN variants v ON v.id = sa.variants_id JOIN items i ON i.id = v.items_id
+     WHERE sa.id = p_sales_id
+       FOR UPDATE OF sa;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV059', 'Order line not found.', jsonb_build_object('sales_id', p_sales_id));
+    END IF;
+    RETURN v_line;
+END $$;
+
+-- Event 13, the sale undone (a void, a cancel, a refund before the handover): the opposite of 11, for one line.
+-- A handed-over unit is returned instead (MV061). p_why: the reason, as the module words it.
+CREATE FUNCTION public.movement_unsell(p_sales_id int8, p_why text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user  int4 := mv_user();   -- an empty session is refused before anything else
+    v_line  record := mv_order_line(p_sales_id);
+    v_order orders%ROWTYPE := mv_order(v_line.orders_id, false);
+    v_here  int4 := v_order.location_id;
+    v_cell  movement_legs%ROWTYPE;
+    v_out   int4;
+    v_facts jsonb := jsonb_build_object('sales_id', p_sales_id);
+BEGIN
+    IF NOT mv_line_sold(p_sales_id) THEN
+        PERFORM mv_refuse('MV060', 'The line is not sold.', v_facts);
+    END IF;
+    IF v_line.serial THEN
+        PERFORM 1 FROM serials WHERE id = v_line.serials_id FOR UPDATE;
+        v_cell := mv_unit_leg(v_line.serials_id);
+        IF v_cell.at_location_id IS NULL THEN
+            PERFORM mv_refuse('MV061', 'Handed over: it is returned, not undone.', v_facts || jsonb_build_object('serials_id', v_line.serials_id));
+        END IF;
+        PERFORM mv_post('sale_undone', 'sales', p_sales_id,
+                        mv_pair(v_line.variants_id, v_line.serials_id, 1, mv_cell(v_cell),
+                                mv_cell(v_cell) || jsonb_build_object('owner_customer_id', NULL, 'owner_location_id', v_here)), p_why);
+        RETURN jsonb_build_object('undone', 1);
+    END IF;
+    PERFORM pg_advisory_xact_lock(v_here, v_line.variants_id::int4);
+    v_out := mv_line_out(p_sales_id, v_here);
+    IF v_out > 0 THEN
+        PERFORM mv_post('sale_undone', 'sales', p_sales_id,
+                        mv_pair(v_line.variants_id, NULL, v_out, jsonb_build_object('state', 'available'),
+                                jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available')), p_why);
+    ELSE
+        PERFORM mv_post('sale_undone', 'sales', p_sales_id, '[]', p_why);
+    END IF;
+    RETURN jsonb_build_object('undone', v_out);
+END $$;
+
+-- Event 14, returned (after the handover): (c·c·s) → (L·L·available), from the order's customer only (MV063), at
+-- the order's location. Counted goods: up to what the line has out (MV062). p_why: the reason, as the module words it.
+CREATE FUNCTION public.movement_return(p_sales_id int8, p_qty int4 DEFAULT 1, p_why text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user  int4 := mv_user();   -- an empty session is refused before anything else
+    v_line  record := mv_order_line(p_sales_id);
+    v_order orders%ROWTYPE := mv_order(v_line.orders_id, false);
+    v_here  int4 := v_order.location_id;
+    v_cell  movement_legs%ROWTYPE;
+    v_out   int4;
+    v_facts jsonb := jsonb_build_object('sales_id', p_sales_id);
+BEGIN
+    IF v_line.serial THEN
+        PERFORM 1 FROM serials WHERE id = v_line.serials_id FOR UPDATE;
+        v_cell := mv_unit_leg(v_line.serials_id);
+        IF v_cell.id IS NULL OR v_cell.at_customer_id IS DISTINCT FROM v_order.customers_id
+           OR v_cell.owner_customer_id IS DISTINCT FROM v_order.customers_id THEN
+            PERFORM mv_refuse('MV063', 'The unit is not with the order''s customer.', v_facts || jsonb_build_object('serials_id', v_line.serials_id));
+        END IF;
+        PERFORM mv_post('returned', 'sales', p_sales_id,
+                        mv_pair(v_line.variants_id, v_line.serials_id, 1, mv_cell(v_cell),
+                                jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available')), p_why);
+        RETURN jsonb_build_object('returned', 1);
+    END IF;
+    PERFORM pg_advisory_xact_lock(v_here, v_line.variants_id::int4);
+    v_out := mv_line_out(p_sales_id, v_here);
+    IF p_qty < 1 OR p_qty > v_out THEN
+        PERFORM mv_refuse('MV062', format('%s back of %s out.', p_qty, v_out), v_facts || jsonb_build_object('want', p_qty, 'out', v_out));
+    END IF;
+    PERFORM mv_post('returned', 'sales', p_sales_id,
+                    mv_pair(v_line.variants_id, NULL, p_qty, jsonb_build_object('state', 'available'),
+                            jsonb_build_object('at_location_id', v_here, 'owner_location_id', v_here, 'state', 'available')), p_why);
+    RETURN jsonb_build_object('returned', p_qty);
+END $$;
+
 -- The unit's position on the layer: where, whose, its state and since when.
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
@@ -772,8 +1027,10 @@ GRANT SELECT ON public.movements, public.movement_legs, public.positions, public
       public.movement_check_serial_mix, public.movement_check_roads, public.unit_claims TO app_staff;
 REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8),
        public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
-       public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb) FROM PUBLIC;
+       public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb),
+       public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
 GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
-      public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb) TO app_staff;
+      public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb),
+      public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text) TO app_staff;
