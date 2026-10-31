@@ -177,3 +177,41 @@ function movementReturn(PDO $pdo, int $saleId, int $qty = 1, ?string $why = null
     return movementCall($pdo, 'movement_return', [[$saleId, 'bigint'], [$qty, 'integer'], [$why, 'text']]);
 }
 
+/**
+ * Event 7, not sent: taken off the remessa's road, back at the origin: a serial-tracked model by its named units,
+ * counted goods by quantity. The master's.
+ *
+ * @param list<int> $serialIds
+ * @return array{taken_off: int, units: list<int>, on_road: int}
+ */
+function movementNotSent(PDO $pdo, int $transferId, int $variantId, int $qty, array $serialIds = [], ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_not_sent', [[$transferId, 'bigint'], [$variantId, 'bigint'], [$qty, 'integer'],
+                                                    [array_values(array_map('intval', $serialIds)), 'jsonb'], [$note, 'text']]);
+}
+
+/**
+ * Event 8, lost on the road: written off where it was, on the remessa's road. $bears: who bears the loss, 'origin'
+ * or 'carrier'. The master's.
+ *
+ * @param list<int> $serialIds
+ * @return array{taken_off: int, units: list<int>, on_road: int}
+ */
+function movementLost(PDO $pdo, int $transferId, int $variantId, int $qty, array $serialIds, string $bears, ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_lost', [[$transferId, 'bigint'], [$variantId, 'bigint'], [$qty, 'integer'],
+                                                [array_values(array_map('intval', $serialIds)), 'jsonb'], [$bears, 'text'], [$note, 'text']]);
+}
+
+/**
+ * Event 9, swapped: the chassis that went was not the one the remessa names. A correction dated at the dispatch:
+ * the named unit never left, the real one went. The master's; the same model; the real one free at the origin and
+ * unmoved since the dispatch.
+ *
+ * @return array{swapped: bool, named: int, real: int}
+ */
+function movementSwap(PDO $pdo, int $transferId, int $namedSerialId, int $realSerialId, ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_swap', [[$transferId, 'bigint'], [$namedSerialId, 'integer'], [$realSerialId, 'integer'], [$note, 'text']]);
+}
+

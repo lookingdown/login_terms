@@ -177,6 +177,16 @@ export const movementMessages = {
     mvRefused_MV061: 'It was handed over: return it instead of undoing the sale.',
     mvRefused_MV062: '{want} back, but the line has {out} out.',
     mvRefused_MV063: 'The unit is not with the order’s customer.',
+    mvRefused_MV070: 'Only the master corrects a transfer.',
+    mvRefused_MV071: 'The unit is not on this road.',
+    mvRefused_MV072: 'Only {have} on the road to take off {want}.',
+    mvRefused_MV073: 'Name the units of a serial-tracked model.',
+    mvRefused_MV074: 'Say who bears the loss: the origin or the carrier.',
+    mvRefused_MV075: 'The real unit is another model.',
+    mvRefused_MV076: 'The real unit is not free at the origin.',
+    mvRefused_MV077: 'The real unit moved after the dispatch: correct it first.',
+    bears_origin: 'borne by the origin',
+    bears_carrier: 'borne by the carrier',
   },
 
   pt: {
@@ -338,6 +348,16 @@ export const movementMessages = {
     mvRefused_MV061: 'Ela já foi entregue: faça a devolução em vez de desfazer a venda.',
     mvRefused_MV062: '{want} de volta, mas a linha tem {out} fora.',
     mvRefused_MV063: 'A moto não está com o cliente do pedido.',
+    mvRefused_MV070: 'Só a matriz corrige uma remessa.',
+    mvRefused_MV071: 'A moto não está nesta estrada.',
+    mvRefused_MV072: 'Há {have} na estrada para tirar {want}.',
+    mvRefused_MV073: 'Diga as unidades de um modelo com chassi.',
+    mvRefused_MV074: 'Diga por conta de quem fica a perda: da origem ou da transportadora.',
+    mvRefused_MV075: 'A moto que foi é de outro modelo.',
+    mvRefused_MV076: 'A moto que foi não está livre na origem.',
+    mvRefused_MV077: 'A moto que foi se moveu depois do envio: corrija-a primeiro.',
+    bears_origin: 'por conta da origem',
+    bears_carrier: 'por conta da transportadora',
   },
 }
 

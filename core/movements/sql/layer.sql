@@ -521,13 +521,13 @@ BEGIN
         -- the line's model on this road, by model and not by delivery line (a swapped chassis may be another
         -- delivery's), locked in id order
         SELECT coalesce(array_agg(u.serials_id ORDER BY u.serials_id), '{}') INTO v_on_road
-          FROM (SELECT DISTINCT ON (l.serials_id) l.serials_id, l.at_transfer_id
+          FROM (SELECT DISTINCT ON (l.serials_id) l.serials_id, l.at_transfer_id, l.state
                   FROM movement_legs l
                  WHERE l.variants_id = v_line.variants_id AND l.qty = 1
                    AND l.serials_id IN (SELECT r.serials_id FROM movement_legs r
                                          WHERE r.at_transfer_id = p_transfers_id AND r.qty = 1 AND r.serials_id IS NOT NULL)
                  ORDER BY l.serials_id, l.id DESC) u
-         WHERE u.at_transfer_id = p_transfers_id;
+         WHERE u.at_transfer_id = p_transfers_id AND u.state <> 'written_off';
         PERFORM 1 FROM serials WHERE id = ANY (v_on_road) ORDER BY id FOR UPDATE;
         v_named := ARRAY(SELECT jsonb_array_elements_text(p_units)::int4);
         IF cardinality(v_named) > 0 THEN
@@ -575,8 +575,155 @@ BEGIN
         PERFORM mv_post('arrived', 'transfers', p_transfers_id, v_legs);
         UPDATE purchase_items SET qty_received = qty_received + v_delta WHERE id = p_line;
     END IF;
-    RETURN jsonb_build_object('arrived', v_delta, 'units', to_jsonb(v_arriving),
-                              'on_road', (SELECT COALESCE(SUM(qty), 0) FROM positions WHERE at_transfer_id = p_transfers_id));
+    RETURN jsonb_build_object('arrived', v_delta, 'units', to_jsonb(v_arriving), 'on_road', mv_on_road(p_transfers_id));
+END $$;
+
+-- What a remessa still carries on its road: what is lost there (written off on the road) is not carried.
+CREATE FUNCTION public.mv_on_road(p_transfers_id int8) RETURNS int4
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT COALESCE(SUM(qty), 0)::int4 FROM positions WHERE at_transfer_id = p_transfers_id AND state <> 'written_off'
+$$;
+
+-- Events 7 and 8, taken off the road: not sent, (r·A·s) → (A·A·s), back at the origin; or lost on the road,
+-- (r·A·s) → (r·A·written_off), with who bears it (the origin or the carrier) at the head of the note
+-- ('bears=carrier'). A serial-tracked model by its named units, counted goods by quantity. The master's (MV070).
+CREATE FUNCTION public.mv_take_off(p_transfers_id int8, p_variants_id int8, p_qty int4, p_units jsonb, p_lost boolean,
+                                   p_bears text, p_note text) RETURNS jsonb
+    LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    v_transfer transfers%ROWTYPE;
+    v_serial   boolean;
+    v_units    int4[] := ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_units, '[]'))::int4 ORDER BY 1);
+    v_unit     int4;
+    v_cell     movement_legs%ROWTYPE;
+    v_have     int4;
+    v_legs     jsonb := '[]';
+    v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id, 'variants_id', p_variants_id);
+BEGIN
+    IF NOT app_at_master() THEN
+        PERFORM mv_refuse('MV070', 'Only the master corrects a transfer.', v_facts);
+    END IF;
+    SELECT * INTO v_transfer FROM transfers WHERE id = p_transfers_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
+    END IF;
+    IF v_transfer.status <> 'sent' THEN
+        PERFORM mv_refuse('MV012', format('Transfer %s is %s, not sent.', p_transfers_id, v_transfer.status),
+                          v_facts || jsonb_build_object('status', v_transfer.status));
+    END IF;
+    IF p_lost AND p_bears IS DISTINCT FROM 'origin' AND p_bears IS DISTINCT FROM 'carrier' THEN
+        PERFORM mv_refuse('MV074', 'Say who bears the loss: the origin or the carrier.', v_facts);
+    END IF;
+    SELECT i.serial INTO v_serial FROM variants v JOIN items i ON i.id = v.items_id WHERE v.id = p_variants_id;
+
+    IF v_serial THEN
+        IF cardinality(v_units) = 0 THEN
+            PERFORM mv_refuse('MV073', 'Name the units of a serial-tracked model.', v_facts);
+        END IF;
+        PERFORM 1 FROM serials WHERE id = ANY (v_units) ORDER BY id FOR UPDATE;
+        FOREACH v_unit IN ARRAY v_units LOOP
+            v_cell := mv_unit_leg(v_unit);
+            IF v_cell.id IS NULL OR v_cell.at_transfer_id IS DISTINCT FROM p_transfers_id OR v_cell.variants_id <> p_variants_id
+               OR v_cell.state = 'written_off' THEN
+                PERFORM mv_refuse('MV071', 'The unit is not on this road.', v_facts || jsonb_build_object('serials_id', v_unit));
+            END IF;
+            v_legs := v_legs || mv_pair(p_variants_id, v_unit, 1, mv_cell(v_cell),
+                                        CASE WHEN p_lost THEN mv_cell(v_cell) || jsonb_build_object('state', 'written_off')
+                                             ELSE mv_cell(v_cell) || jsonb_build_object('at_transfer_id', NULL,
+                                                                                        'at_location_id', v_transfer.location_id) END);
+        END LOOP;
+        p_qty := cardinality(v_units);
+    ELSE
+        PERFORM pg_advisory_xact_lock(0, p_variants_id::int4);                         -- the road first, as 009
+        PERFORM pg_advisory_xact_lock(v_transfer.location_id, p_variants_id::int4);
+        SELECT COALESCE(SUM(qty), 0) INTO v_have FROM positions
+         WHERE variants_id = p_variants_id AND at_transfer_id = p_transfers_id AND state = 'available';
+        IF p_qty IS NULL OR p_qty < 1 OR p_qty > v_have THEN
+            PERFORM mv_refuse('MV072', format('Only %s on the road to take off %s.', v_have, p_qty),
+                              v_facts || jsonb_build_object('have', v_have, 'want', p_qty));
+        END IF;
+        v_legs := mv_pair(p_variants_id, NULL, p_qty,
+                          jsonb_build_object('at_transfer_id', p_transfers_id, 'owner_location_id', v_transfer.location_id, 'state', 'available'),
+                          CASE WHEN p_lost
+                               THEN jsonb_build_object('at_transfer_id', p_transfers_id, 'owner_location_id', v_transfer.location_id, 'state', 'written_off')
+                               ELSE jsonb_build_object('at_location_id', v_transfer.location_id, 'owner_location_id', v_transfer.location_id, 'state', 'available') END);
+    END IF;
+
+    PERFORM mv_post(CASE WHEN p_lost THEN 'lost' ELSE 'not_sent' END, 'transfers', p_transfers_id, v_legs,
+                    CASE WHEN p_lost THEN 'bears=' || p_bears || COALESCE(' · ' || NULLIF(p_note, ''), '') ELSE p_note END);
+    RETURN jsonb_build_object('taken_off', p_qty, 'units', to_jsonb(v_units), 'on_road', mv_on_road(p_transfers_id));
+END $$;
+
+CREATE FUNCTION public.movement_not_sent(p_transfers_id int8, p_variants_id int8, p_qty int4, p_units jsonb, p_note text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN
+    RETURN mv_take_off(p_transfers_id, p_variants_id, p_qty, p_units, false, NULL, p_note);
+END $$;
+
+CREATE FUNCTION public.movement_lost(p_transfers_id int8, p_variants_id int8, p_qty int4, p_units jsonb, p_bears text,
+                                     p_note text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user int4 := mv_user();   -- an empty session is refused before anything else
+BEGIN
+    RETURN mv_take_off(p_transfers_id, p_variants_id, p_qty, p_units, true, p_bears, p_note);
+END $$;
+
+-- Event 9, swapped: the chassis that went was not the one the remessa names. A correction dated at the dispatch:
+-- the named unit (r·A·s) → (A·A·s), it never left; the real one (A·A·s) → (r·A·s), it went. The master's (MV070);
+-- the same model (MV075); the real one free at the origin (MV076) and unmoved since the dispatch (MV077). The
+-- remessa's units follow (transfer_units).
+CREATE FUNCTION public.movement_swap(p_transfers_id int8, p_named int4, p_real int4, p_note text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
+    v_transfer transfers%ROWTYPE;
+    v_dispatch movements%ROWTYPE;
+    v_named    movement_legs%ROWTYPE;
+    v_real     movement_legs%ROWTYPE;
+    v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id, 'named', p_named, 'real', p_real);
+BEGIN
+    IF NOT app_at_master() THEN
+        PERFORM mv_refuse('MV070', 'Only the master corrects a transfer.', v_facts);
+    END IF;
+    SELECT * INTO v_transfer FROM transfers WHERE id = p_transfers_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
+    END IF;
+    IF v_transfer.status <> 'sent' THEN
+        PERFORM mv_refuse('MV012', format('Transfer %s is %s, not sent.', p_transfers_id, v_transfer.status),
+                          v_facts || jsonb_build_object('status', v_transfer.status));
+    END IF;
+    PERFORM 1 FROM serials WHERE id IN (p_named, p_real) ORDER BY id FOR UPDATE;
+    v_named := mv_unit_leg(p_named);
+    v_real := mv_unit_leg(p_real);
+    IF v_named.id IS NULL OR v_named.at_transfer_id IS DISTINCT FROM p_transfers_id OR v_named.state = 'written_off' THEN
+        PERFORM mv_refuse('MV071', 'The unit is not on this road.', v_facts || jsonb_build_object('serials_id', p_named));
+    END IF;
+    IF v_real.id IS NULL OR v_real.variants_id <> v_named.variants_id THEN
+        PERFORM mv_refuse('MV075', 'The real unit is another model.', v_facts);
+    END IF;
+    IF v_real.at_location_id IS DISTINCT FROM v_transfer.location_id OR v_real.owner_location_id IS DISTINCT FROM v_transfer.location_id
+       OR v_real.state = 'written_off' OR EXISTS (SELECT 1 FROM unit_claims c WHERE c.serials_id = p_real) THEN
+        PERFORM mv_refuse('MV076', 'The real unit is not free at the origin.', v_facts || jsonb_build_object('claim', mv_unit_claim(p_real)));
+    END IF;
+    SELECT * INTO v_dispatch FROM movements
+     WHERE kind = 'dispatched' AND ref_type = 'transfers' AND ref_id = p_transfers_id ORDER BY id LIMIT 1;
+    IF v_real.movements_id > v_dispatch.id THEN   -- posted after the dispatch, though it be the same second
+        PERFORM mv_refuse('MV077', 'The real unit moved after the dispatch: correct it first.', v_facts);
+    END IF;
+
+    PERFORM mv_post('swapped', 'transfers', p_transfers_id,
+                    mv_pair(v_named.variants_id, p_named, 1, mv_cell(v_named),
+                            mv_cell(v_named) || jsonb_build_object('at_transfer_id', NULL, 'at_location_id', v_transfer.location_id))
+                    || mv_pair(v_real.variants_id, p_real, 1, mv_cell(v_real),
+                               mv_cell(v_real) || jsonb_build_object('at_location_id', NULL, 'at_transfer_id', p_transfers_id)),
+                    p_note, v_dispatch.occurred_at, v_dispatch.id);
+    DELETE FROM transfer_units WHERE transfers_id = p_transfers_id AND serials_id = p_named;
+    INSERT INTO transfer_units VALUES (p_transfers_id, p_real) ON CONFLICT DO NOTHING;
+    RETURN jsonb_build_object('swapped', true, 'named', p_named, 'real', p_real);
 END $$;
 
 -- What a unit or a model cost a location, from its receipt there: a remessa's price if it arrived by remessa, else
@@ -983,7 +1130,7 @@ SELECT l.id AS leg_id, l.variants_id, l.serials_id
 CREATE VIEW public.movement_check_roads AS
 SELECT p.at_transfer_id AS transfers_id, t.status, p.variants_id, p.qty
   FROM positions p JOIN transfers t ON t.id = p.at_transfer_id
- WHERE p.qty <> 0 AND t.status <> 'sent';
+ WHERE p.qty <> 0 AND t.status <> 'sent' AND p.state <> 'written_off';
 
 -- RLS in the house's way (code §3.1): forced, with policies for app_staff and app_portal. The master reads all;
 -- a shop reads where it is the place or the owner, and the road of a remessa from or to it (transfers' own
@@ -1028,9 +1175,13 @@ GRANT SELECT ON public.movements, public.movement_legs, public.positions, public
 REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(), public.mv_post(text, text, int8, jsonb, text, timestamp, int8),
        public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
        public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb),
-       public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text) FROM PUBLIC;
+       public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text),
+       public.mv_take_off(int8, int8, int4, jsonb, boolean, text, text), public.movement_not_sent(int8, int8, int4, jsonb, text),
+       public.movement_lost(int8, int8, int4, jsonb, text, text), public.movement_swap(int8, int4, int4, text) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
 GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
       public.movement_receive(int8, int4, jsonb), public.movement_arrive(int8, int8, int4, jsonb),
-      public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text) TO app_staff;
+      public.movement_sell(int8), public.movement_hand_over(int8), public.movement_unsell(int8, text), public.movement_return(int8, int4, text),
+      public.movement_not_sent(int8, int8, int4, jsonb, text), public.movement_lost(int8, int8, int4, jsonb, text, text),
+      public.movement_swap(int8, int4, int4, text) TO app_staff;
