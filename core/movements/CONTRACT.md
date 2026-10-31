@@ -12,7 +12,10 @@ For inventory-master (`php-files/functions.php`) and the four core kernels it re
    screen never gets a second spelling of the same fact.
 3. **A writer answers the shape its screen reads,** so the screen redraws from the answer, without fetching again.
 4. **A writer writes its documents, then makes one call to the layer.** It never writes a position, a state or a leg.
-5. **Places come twice:** as coordinates for code (`location:2`, `road:55`) and as words for people (`where`).
+5. **No words leave the server.** What a person reads goes as a key and its parameters, and the module's i18n turns
+   it into words, per locale. `i18n/movements.js` holds the layer's words, in en and pt. Keys are English. Names (a
+   location's, a customer's) and numbers (a chassis, a remessa) travel as parameters. Places travel as coordinates
+   (`location:2`, `road:55`).
 
 ## The shapes
 
@@ -23,16 +26,20 @@ For inventory-master (`php-files/functions.php`) and the four core kernels it re
     'id' => 503, 'serial_number' => '9C2KC1650PR000004', 'observations' => null,
     'model' => ['variants_id' => 100, 'sku' => 'MX-VERDE', 'items_id' => 10, 'item_name' => 'Moto X', 'segment' => 'moto'],
     'position' => ['place' => 'road:55', 'owner' => 'location:1', 'state' => 'available',
-                   'since' => '2026-10-31 09:12:40', 'why' => 'dispatched', 'where' => 'A caminho de Prudente · REM-0055'],
-    'word' => ['key' => 'transit', 'label' => 'Em trânsito'],
+                   'since' => '2026-10-31 09:12:40', 'why' => 'dispatched',
+                   'where' => ['key' => 'road', 'params' => ['to' => 'Prudente', 'transfers_id' => 55]]],
+    'word' => 'transit',
     'claim' => null,     // ['kind' => 'draft' | 'order' | 'fleet', 'ref' => Ref]: what holds it
     'bench' => null,     // ['assembly_id' => 81, 'stage' => 'in_process']: its open assembly job
+    'service' => null,   // ['service_orders_id' => 12, 'status' => 'in_progress', 'phase' => 'in_work']: its open service order
     'earmark' => null,   // ['location_id' => 2, 'name' => 'Prudente']: a hint, never a claim
 ]
 ```
 
 - `position` is the unit's dot now (the cube's fact at `now`): its place, owner and state, `since` (when its stay
   began) and `why` (the movement that put it there). It is null for a unit that is nothing yet.
+- `where` is its place for people: a key (`master`, `location`, `road`, `customer`, `supplier`, `books`) and the
+  names it needs. The screen shows `t('message.place_' + where.key, where.params)`.
 - A screen that needs them adds document facts beside it:
   - `purchase`: `purchases_id`, `nf`, `supplier_name`, `arrived`
   - `cost`: what the unit cost the location it stands at, from its receipt there
@@ -41,30 +48,36 @@ For inventory-master (`php-files/functions.php`) and the four core kernels it re
 
 ### Word
 
-One vocabulary, derived from the position. It replaces `serialState()`. The keys are stable; the labels are the install's.
+One vocabulary, derived from the position, replacing `serialState()`. Each key is an English word; its words for
+people are `unitWord_<key>` in the i18n (Pronta, Ready, …).
 
-| key | label | when | today |
-|---|---|---|---|
-| `boxed` | Recebido | validating; its job received, or no job | boxed |
-| `unboxed` | Revisado | validating; its job revised | unboxed |
-| `assembling` | Em montagem | validating; its job in process | assembling |
-| `built` | Pronta | available; its job ready, still at the workshop | built |
-| `stock` | No estoque | available where its owner stands, nothing holding it | stock |
-| `assigned` | Atribuída | as `stock`, with an earmark | assigned |
-| `held` | Em remessa | held by a remessa draft | held |
-| `reserved` | Reservada | held by an order line not yet paid in full | new |
-| `fleet` | Na frota | held by the rental fleet | new |
-| `transit` | Em trânsito | on a remessa's road | transit |
-| `sold` | Vendida | its customer's, still at the shop | sold, in part |
-| `delivered` | Com o cliente | handed over | sold, in part |
-| `rented` | Na locação | with a customer, still the location's, by a rental | rental |
-| `loaned` | Emprestada | the same, by a loan | loan |
-| `provider` | Devolvida ao fornecedor | at its supplier | returned, in part |
-| `workshop` | Na oficina | at the workshop (step F) | warranty |
-| `written_off` | Baixada | written off | written_off, scrapped |
-| `unknown` | — | no position yet | unknown |
+| key | when | today |
+|---|---|---|
+| `boxed` | validating; its job received, or no job | boxed |
+| `unboxed` | validating; its job revised | unboxed |
+| `assembling` | validating; its job in process | assembling |
+| `built` | available; its job ready, still at the workshop | built |
+| `stock` | available where its owner stands, nothing holding it | stock |
+| `assigned` | as `stock`, with an earmark | assigned |
+| `held` | held by a remessa draft | held |
+| `reserved` | held by an order line not yet paid in full | new |
+| `fleet` | held by the rental fleet | new |
+| `transit` | on a remessa's road | transit |
+| `sold` | its customer's, still at the shop | sold, in part |
+| `delivered` | handed over | sold, in part |
+| `rented` | with a customer, still the location's, by a rental | rental |
+| `loaned` | the same, by a loan | loan |
+| `provider` | at its supplier | returned, in part |
+| `workshop` | an open service order, whatever its cell, until step F makes the workshop a place | warranty |
+| `written_off` | written off | written_off, scrapped |
+| `unknown` | no position yet | unknown |
 
-- **Precedence:** `held`, `reserved`, `fleet`, `assigned`, `built`, then `stock`, whichever applies first.
+- **Precedence:** `workshop`, `held`, `reserved`, `fleet`, `assigned`, `built`, then `stock`, whichever applies first.
+- **The workshop's phases** (`service.phase`, words `servicePhase_<phase>`), from the service order's status:
+  `received` (receiving, pending); `in_work` (diagnosing, awaiting_authorization, in_progress, waiting_parts);
+  `finished` (ready, delivery_scheduled). Completed and cancelled close it.
+- **The bench** stays as it shows today: the assembly job's stage gives the word, and `built` and `back_to_bench`
+  move the unit.
 - **Keys that go:**
   - `transferred`, the master's copy of a bike: one database holds one unit
   - `returned`: a customer's return puts the bike back in stock, and its line says so
@@ -91,13 +104,14 @@ One movement as one location sees it. Movimentações and a model's last moves a
 
 ```php
 [
-    'movement_id' => 6, 'at' => '2026-10-31 09:12:40', 'recorded_at' => '2026-10-31 09:12:40',
-    'kind' => 'built', 'kind_label' => 'Montada',
+    'movement_id' => 6, 'at' => '2026-10-31 09:12:40', 'recorded_at' => '2026-10-31 09:12:40', 'kind' => 'built',
     'model' => ['variants_id' => 100, 'sku' => 'MX-VERDE', 'item_name' => 'Moto X'],
     'unit' => ['id' => 504, 'serial_number' => '9C2KC1650PR000005'],   // null for counted goods
     'qty' => 0,          // what it changed in the location's own stock: −1 dispatched, +1 arrived, 0 built
-    'from' => 'Na bancada · Matriz', 'to' => 'No estoque · Matriz',
-    'ref' => ['type' => 'assembly', 'id' => 81, 'label' => 'montagem #81'],
+    'from' => ['place' => 'location:1', 'state' => 'validating'],
+    'to' => ['place' => 'location:1', 'state' => 'available'],
+    'names' => ['location:1' => 'Matriz'],
+    'ref' => ['type' => 'assembly', 'id' => 81],
     'note' => null, 'who' => 'Johan',
 ]
 ```
@@ -105,39 +119,28 @@ One movement as one location sees it. Movimentações and a model's last moves a
 - When the list is one model at one location, each row carries `balance`: the location's own stock after it.
 - A document's process lines come in the same row, with `qty` 0 and `from` and `to` as their stages: `kind`
   `assembly` for an assembly job's stage, `service` for a service order's state.
-- The kinds and their labels:
-
-| kind | label | kind | label |
-|---|---|---|---|
-| `opening` | Saldo inicial | `sold` | Vendida |
-| `received` | Recebida | `handed_over` | Entregue |
-| `receipt_corrected` | Recebimento corrigido | `sale_undone` | Venda desfeita |
-| `built` | Montada | `returned` | Devolvida pelo cliente |
-| `back_to_bench` | Voltou para a montagem | `traded_in` | Recebida na troca |
-| `dispatched` | Saiu na remessa | `rented`, `rental_back` | Alugada, Voltou da locação |
-| `arrived` | Chegou | `loaned`, `loan_back` | Emprestada, Voltou do empréstimo |
-| `not_sent` | Tirada da remessa | `workshop_in`, `workshop_out` | Entrou na oficina, Saiu da oficina |
-| `lost` | Perdida na estrada | `written_off` | Baixada |
-| `swapped` | Troca de chassi | `to_provider` | Devolvida ao fornecedor |
-| `flipped` | Transferência rápida | `adjusted`, `counted` | Ajuste, Inventário |
-| `corrected` | Correção | `assembly`, `service` | Montagem, Oficina (the documents' lines) |
+- The kinds, their words `mvKind_<kind>`: `opening`, `received`, `receipt_corrected`, `built`, `back_to_bench`,
+  `dispatched`, `arrived`, `not_sent`, `lost`, `swapped`, `flipped`, `sold`, `handed_over`, `sale_undone`,
+  `returned`, `traded_in`, `rented`, `rental_back`, `loaned`, `loan_back`, `workshop_in`, `workshop_out`,
+  `written_off`, `to_provider`, `adjusted`, `counted`, `corrected`; and the documents' lines, `assembly` and `service`.
 
 ### Ref, page, refusal
 
-- **Ref:** the document behind something, to link to: `['type' => 'transfers', 'id' => 55, 'label' => 'REM-0055']`.
+- **Ref:** the document behind something, to link to: `['type' => 'transfers', 'id' => 55]`. Its words are `refType_<type>`.
 - **Page:** `totalRows`, `totalPages`, `currentPage`, `previousPage` and `nextPage`, as today. Each list adds its own
-  keys: `counts`, `scope`, `labels` or `kinds`.
+  keys: `counts`, `scope` or `kinds`.
 - **Refusal:** the layer's `MovementRefused` reaches lib.php. The module answers in its error shape, as the NF-e
-  actions already do: `['success' => false, 'error' => <the operator's Portuguese>]`. It adds `code` (`MV0nn`) and `facts`.
+  actions already do: `['success' => false, 'error' => <an English message, for the log>]`, with `code` (`MV0nn`) and
+  `facts`. The screen shows `t('message.mvRefused_' + code, refusalParams(t, facts))`.
 
 ## The kernels
 
 | today | becomes | answers |
 |---|---|---|
-| `serialState($row)` | `unitWord($position, $claim, $bench, $earmark)` | Word |
-| `stockUnitsList($pdo, $in, $location, $whereLabel)` | `stockUnitsList($pdo, $in, $location)`, on the layer | Units with `purchase`, `cost` and `price`; a page with `scope`, `scopeTotal`, `counts` per word and `labels` |
+| `serialState($row)` | `unitWord($position, $claim, $bench, $service, $earmark)` | the Word's key |
+| `stockUnitsList($pdo, $in, $location, $whereLabel)` | `stockUnitsList($pdo, $in, $location)`, on the layer | Units with `purchase`, `cost` and `price`; a page with `scope`, `scopeTotal` and `counts` per word |
 | `unitTimeline($id)` | `unitTrajectory($pdo, $id)` | `unit`, `facts`, `trail`, `line` and `events` (below) |
-| `movementLog` and `movementLogCsv` | `movementsList($pdo, $in, $location)` and `movementsCsv` | movement rows; a page with `kinds` |
+| `movementLog` and `movementLogCsv` | `movementsList($pdo, $in, $location)` and `movementsCsv` | movement rows; a page with `kinds`, the keys |
 
 - **`stockUnitsList`'s scope:**
   - `current`: standing at the location, or its own anywhere (on a road from it, out on a rental), or on a road to it
@@ -155,7 +158,7 @@ One movement as one location sees it. Movimentações and a model's last moves a
 
 | function | screen | reads through | answers | what changes |
 |---|---|---|---|---|
-| `getStockOverview` | Estoque, per model | the on-hand, sellable, road and owned-elsewhere readers; the open deliveries | model lines with `deliveries`; a page | `stock`, `units` and the ✗ become `here`, `sellable`, `road` and `elsewhere`. The mismatch filter goes: a bike's count is its units |
+| `getStockOverview` | Estoque, per model | the on-hand, sellable, road and owned-elsewhere readers; the open deliveries | model lines with `deliveries`; a page | `stock`, `units` and the ✗ become `here`, `sellable`, `road` and `elsewhere`. The mismatch filter goes: a bike's count is its units. Low stock is `sellable` at or below `low_stock` |
 | `getStockMovements($variant)` | a model's last moves | `movementsList`, one model | movement rows with `balance` | `stock_after` is `balance` |
 | `getMovementLog`, `streamMovementLogCsv` | Movimentações | `movementsList`, `movementsCsv` | movement rows; a page with `kinds` | one row per event: a sale once, a remessa as `dispatched` and `arrived` |
 | `getSerial($id)` | the unit's page | the Unit; its sales, as today | Unit, `sales`, `actions` | the status you could edit becomes `word`, which is read-only. `actions` lists what can be done to it now: the `cubeActions()` that fit its position. The database still has the last word |
@@ -168,7 +171,7 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | `assignSuggest` | Montar a remessa, the shortages | the destination's on-hand; the road to it; earmarked units here | as today | `transit` counts counted goods too |
 | `listLocationStock` | De uma loja | the units and model lines at the shop, available, nothing holding them | as today | `units[].since` is the stay's start, not rebuilt from the history |
 | `listOpenDeliveries`, `listDeliverySerials` | Distribuir | the delivery line's units here, available, nothing holding them (or held by this draft) | as today, the units as Units | — |
-| `listRecentSerials` | Rastrear, the front | units by their last movement | Units with `moved_at` | `moved_at` is the last movement. Bench work is a document's (decision 2) |
+| `listRecentSerials` | Rastrear, the front | units by their last movement or service order step | Units with `moved_at` | `moved_at` is its last movement or its service order's last step. The bench counts through `built` and `back_to_bench` |
 | `getUnitTimeline`, `inventoryMasterPassportSerial` | Rastrear, the passport | `unitTrajectory` | see the kernels | the story is the line plus the documents |
 | `getPurchaseOrder` | a delivery and its receipt | the document; each line's units | as today, `lines[].units` as Units | `serials` is `units` |
 | `searchVariants`, `getItemVariants` | the pickers | the on-hand reader | as today, with `here` and `sellable` | `stock` is `here` |
@@ -184,8 +187,8 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | `deleteSerial` | `id`, the password | — | `movementUnitRemove` | `{id, deleted}` | anything beyond its receipt; named by a sale, a job, a service order or an NF-e |
 | `saveTransferDraft` | as today | the remessa and its lines | `claimHold` / `claimRelease` (`transfer_units`) instead of `serials.transfers_id` | `getTransfer` | a unit not free here |
 | `cancelTransferDraft` | `id` | the remessa cancelled | `claimRelease` | `{id, discarded}` | — |
-| `dispatchTransfer` | `id`, `expected` (the shop's order's expected date) | the shop's order and its lines; the remessa sent | `movementDispatch` | as today, with `legs` | MV010–MV017 |
-| `relocateStock` | as today | the remessa from the shop; the destination's order | `movementDispatch` | as today | as dispatch |
+| `dispatchTransfer` | `id`, `expected_at` (the expected arrival, a date and a time: a same-day delivery has its hour) | `transfers.expected_at`; the shop's order (its `expected`, the date) and its lines; the remessa sent | `movementDispatch` | as today, with `legs` | MV010–MV018: MV018 without an expected arrival |
+| `relocateStock` | as today, with `expected_at` | the remessa from the shop; the destination's order | `movementDispatch` | as today | as dispatch |
 | `takeOffTransfer` | `id`, `line_id`, `serials` or `qty`, `lost`, `bears` | the lines and the shop's order settled | `movementNotSent`, or `movementLost` (who bears it, in the note) | as today | not on that road; not the master |
 | `swapTransferUnit` | `id`, `recorded`, `actual` | the correction's note on the shop's order | `movementSwap`, a correction dated at the dispatch | as today | another SKU; the real one not free at the origin |
 | `resolveTransfer` | `id`, `note` | the shop's receipt check | none: it moves nothing | as today | — |
@@ -203,9 +206,14 @@ One movement as one location sees it. Movimentações and a model's last moves a
 | A remessa's received quantity comes from its arrivals; its units stay on its page after arriving | today it is the receiving location's ledger rows, and units leave the page when they arrive |
 | The numbers the client settles before the opening: D1 (CDV, −4), D2 (remessa 23), D5 (unit 61), D7 (28 lines), D8 (29 lines), D9 (unit 110) | their corrections, before the opening (rule §0.2) |
 
-## For Johan to decide
+## Decided (Johan, 2026-10-31)
 
-1. **Low stock:** measured on `sellable` (what can be sold) or on `here` (what stands there)?
-2. **Rastrear's "recently moved":** movements only, or the bench's work too?
-3. **`built` (Pronta):** keep "ready, still at the workshop" as a word of its own?
-4. **A remessa's expected arrival:** it already exists. `dispatchTransfer` writes it on the shop's order (`purchases.expected`), set to the dispatch day unless one is given. If the screen asks for it at dispatch, the cube can plan the arrival.
+1. **Low stock** is measured on `sellable`.
+2. **Rastrear's "recently moved"** counts the movements and a service order's steps (received, being worked on,
+   finished). The bench keeps its stage words, moved by `built` and `back_to_bench`.
+3. **`built`** stays: ready, still at the workshop.
+4. **A remessa's expected arrival** is asked at dispatch, a date and a time (`transfers.expected_at`), so a same-day
+   delivery has its hour. Dispatch refuses a remessa without one (MV018). The cube plans each unit's arrival at the
+   destination, and an appointment there after the expected arrival is no conflict.
+5. **Words:** keys and interfaces are English, and every word for people comes from i18n. New code keeps to it; old
+   code changes when it is rewritten.

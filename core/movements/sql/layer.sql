@@ -9,6 +9,10 @@ CREATE TABLE public.transfer_units (
     PRIMARY KEY (transfers_id, serials_id)
 );
 
+-- A remessa's expected arrival, a date and a time (a same-day delivery has its hour): the road's forward end.
+-- Dispatch refuses a remessa without one (MV018); the shop's order keeps its date in purchases.expected.
+ALTER TABLE public.transfers ADD COLUMN IF NOT EXISTS expected_at timestamp(0);
+
 -- One row per business event.
 CREATE TABLE public.movements (
     id          int8 GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -119,6 +123,8 @@ CREATE TRIGGER movement_legs_no_truncate BEFORE TRUNCATE ON public.movement_legs
     FOR EACH STATEMENT EXECUTE FUNCTION public.movements_append_only();
 
 -- A refusal: its code (MV0nn), the operator's Portuguese, and one line of facts PHP reads whole.
+-- A refusal: its code, an English message for the log, and its facts. The code is the i18n key
+-- (mvRefused_<code>, i18n/movements.js) and the facts are its parameters: no words for people leave here.
 CREATE FUNCTION public.mv_refuse(p_code text, p_message text, p_facts jsonb DEFAULT '{}') RETURNS void
     LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
@@ -132,7 +138,7 @@ CREATE FUNCTION public.mv_user() RETURNS int4
 DECLARE v text := NULLIF(current_setting('app.user', true), '');
 BEGIN
     IF v IS NULL THEN
-        PERFORM mv_refuse('MV001', 'Nenhum usuário nesta sessão: entre pelo login.');
+        PERFORM mv_refuse('MV001', 'No user in this session: sign in.');
     END IF;
     RETURN v::integer;
 END $$;
@@ -153,17 +159,21 @@ DECLARE
     v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id);
 BEGIN
     IF NOT app_at_master() THEN
-        PERFORM mv_refuse('MV010', 'Uma remessa sai da matriz.', v_facts);
+        PERFORM mv_refuse('MV010', 'A transfer leaves from the master.', v_facts);
     END IF;
     SELECT * INTO v_transfer FROM transfers WHERE id = p_transfers_id FOR UPDATE;
     IF NOT FOUND THEN
-        PERFORM mv_refuse('MV011', 'Remessa não encontrada.', v_facts);
+        PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
     END IF;
     IF v_transfer.status <> 'sent' THEN
-        PERFORM mv_refuse('MV012', format('A remessa %s está como %s, não enviada.', p_transfers_id, v_transfer.status), v_facts);
+        PERFORM mv_refuse('MV012', format('Transfer %s is %s, not sent.', p_transfers_id, v_transfer.status),
+                          v_facts || jsonb_build_object('status', v_transfer.status));
     END IF;
     IF EXISTS (SELECT 1 FROM movement_legs WHERE at_transfer_id = p_transfers_id) THEN
-        PERFORM mv_refuse('MV013', format('A remessa %s já está na estrada.', p_transfers_id), v_facts);
+        PERFORM mv_refuse('MV013', format('Transfer %s is already on the road.', p_transfers_id), v_facts);
+    END IF;
+    IF v_transfer.expected_at IS NULL THEN
+        PERFORM mv_refuse('MV018', format('Transfer %s has no expected arrival.', p_transfers_id), v_facts);
     END IF;
 
     INSERT INTO movements (kind, users_id, ref_type, ref_id)
@@ -179,7 +189,7 @@ BEGIN
          WHERE serials_id = v_unit.id AND qty = 1 ORDER BY id DESC LIMIT 1;
         IF NOT FOUND OR v_cell.at_location_id IS DISTINCT FROM v_transfer.location_id
                      OR v_cell.owner_location_id IS DISTINCT FROM v_transfer.location_id THEN
-            PERFORM mv_refuse('MV014', 'A moto não está no estoque de quem envia.',
+            PERFORM mv_refuse('MV014', 'The unit is not in the sender''s stock.',
                               v_facts || jsonb_build_object('serials_id', v_unit.id));
         END IF;
         INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty,
@@ -196,14 +206,14 @@ BEGIN
                    WHERE ti.transfers_id = p_transfers_id
                    GROUP BY ti.variants_id ORDER BY ti.variants_id LOOP
         IF NOT v_line.sellable THEN
-            PERFORM mv_refuse('MV015', 'Materiais não entram nos movimentos.',
+            PERFORM mv_refuse('MV015', 'Materials do not move through the ledger.',
                               v_facts || jsonb_build_object('variants_id', v_line.variants_id));
         END IF;
         IF v_line.serial THEN
             -- a bike line leaves only with its units
             IF v_line.qty <> (SELECT count(*) FROM transfer_units tu JOIN serials s ON s.id = tu.serials_id
                                WHERE tu.transfers_id = p_transfers_id AND s.variants_id = v_line.variants_id) THEN
-                PERFORM mv_refuse('MV016', 'Cada moto da remessa precisa da sua unidade.',
+                PERFORM mv_refuse('MV016', 'Every serial-tracked line of the transfer needs its units.',
                                   v_facts || jsonb_build_object('variants_id', v_line.variants_id));
             END IF;
             CONTINUE;
@@ -214,8 +224,8 @@ BEGIN
          WHERE variants_id = v_line.variants_id AND state = 'available'
            AND at_location_id = v_transfer.location_id AND owner_location_id = v_transfer.location_id;
         IF v_have < v_line.qty THEN
-            PERFORM mv_refuse('MV017', format('Há %s em estoque para enviar %s.', v_have, v_line.qty),
-                              v_facts || jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have));
+            PERFORM mv_refuse('MV017', format('Only %s in stock to send %s.', v_have, v_line.qty),
+                              v_facts || jsonb_build_object('variants_id', v_line.variants_id, 'have', v_have, 'want', v_line.qty));
         END IF;
         INSERT INTO movement_legs (movements_id, variants_id, qty, at_location_id, at_transfer_id, owner_location_id, state)
         VALUES (v_movement, v_line.variants_id, -v_line.qty, v_transfer.location_id, NULL, v_transfer.location_id, 'available'),
@@ -253,25 +263,26 @@ DECLARE
 BEGIN
     PERFORM 1 FROM serials WHERE id = p_serials_id FOR UPDATE;
     IF NOT FOUND THEN
-        PERFORM mv_refuse('MV020', 'Unidade não encontrada.', v_facts);
+        PERFORM mv_refuse('MV020', 'Unit not found.', v_facts);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM assembly WHERE id = p_assembly_id AND serials_id = p_serials_id) THEN
-        PERFORM mv_refuse('MV021', 'Esta moto não é a da montagem.', v_facts);
+        PERFORM mv_refuse('MV021', 'The unit is not this assembly job''s.', v_facts);
     END IF;
     SELECT * INTO v_cell FROM movement_legs WHERE serials_id = p_serials_id AND qty = 1 ORDER BY id DESC LIMIT 1;
     IF NOT FOUND OR v_cell.at_location_id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_cell.owner_location_id
        OR v_cell.state <> v_from THEN
-        PERFORM mv_refuse('MV022', CASE p_to WHEN 'available' THEN 'A moto não está em montagem.'
-                                             ELSE 'A moto não está no estoque para voltar à bancada.' END,
+        PERFORM mv_refuse(CASE p_to WHEN 'available' THEN 'MV022' ELSE 'MV025' END,
+                          CASE p_to WHEN 'available' THEN 'The unit is not on the bench.'
+                                    ELSE 'The unit is not in stock to go back to the bench.' END,
                           v_facts || jsonb_build_object('state', v_cell.state));
     END IF;
     IF v_cell.at_location_id <> app_location() THEN
-        PERFORM mv_refuse('MV023', 'A moto está em outra loja.', v_facts || jsonb_build_object('location_id', v_cell.at_location_id));
+        PERFORM mv_refuse('MV023', 'The unit stands at another location.', v_facts || jsonb_build_object('location_id', v_cell.at_location_id));
     END IF;
     IF p_to = 'validating' THEN
         v_claim := mv_unit_claim(p_serials_id);
         IF v_claim IS NOT NULL THEN
-            PERFORM mv_refuse('MV024', 'A moto está reservada e não volta à bancada.', v_facts || jsonb_build_object('claim', v_claim));
+            PERFORM mv_refuse('MV024', 'The unit is held and cannot go back to the bench.', v_facts || jsonb_build_object('claim', v_claim));
         END IF;
     END IF;
 

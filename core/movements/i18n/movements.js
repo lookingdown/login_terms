@@ -1,0 +1,251 @@
+/**
+ * core/movements/i18n/movements.js — the movement layer's words, for every module's vue-i18n `message` block.
+ *
+ * The server sends keys and parameters, never words (CONTRACT.md). These turn them into words, per locale:
+ *
+ *   import { movementMessages } from '…/movements/i18n/movements.js'
+ *   messages.en.message = { ...movementMessages.en, ...messages.en.message }
+ *
+ *   t('message.unitWord_' + unit.word)
+ *   t('message.mvKind_' + row.kind)
+ *   t('message.place_' + unit.position.where.key, unit.position.where.params)
+ *   t('message.mvRefused_' + error.code, refusalParams(t, error.facts))
+ *
+ * A key is a prefix and an English word: unitWord_<word>, mvKind_<kind>, planKind_<kind>, unitState_<state>,
+ * claim_<kind>, servicePhase_<phase>, place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>.
+ * A new locale is a third block with the same keys.
+ */
+
+export const movementMessages = {
+  en: {
+    unitWord_boxed: 'Received',
+    unitWord_unboxed: 'Checked',
+    unitWord_assembling: 'Being assembled',
+    unitWord_built: 'Ready',
+    unitWord_stock: 'In stock',
+    unitWord_assigned: 'Earmarked',
+    unitWord_held: 'On a transfer',
+    unitWord_reserved: 'Reserved',
+    unitWord_fleet: 'In the rental fleet',
+    unitWord_transit: 'In transit',
+    unitWord_sold: 'Sold',
+    unitWord_delivered: 'With the customer',
+    unitWord_rented: 'On rental',
+    unitWord_loaned: 'On loan',
+    unitWord_provider: 'Returned to the supplier',
+    unitWord_workshop: 'In the workshop',
+    unitWord_written_off: 'Written off',
+    unitWord_unknown: '—',
+
+    servicePhase_received: 'Received in the workshop',
+    servicePhase_in_work: 'Being worked on',
+    servicePhase_finished: 'Finished in the workshop',
+
+    unitState_validating: 'on the bench',
+    unitState_available: 'available',
+    unitState_written_off: 'written off',
+
+    claim_order: 'an order',
+    claim_draft: 'a transfer draft',
+    claim_fleet: 'the rental fleet',
+
+    place_master: 'Central stock',
+    place_location: '{name}',
+    place_road: 'On the road to {to}',
+    place_customer: 'With {name}',
+    place_supplier: 'At the supplier {name}',
+    place_books: '—',
+
+    mvKind_opening: 'Opening balance',
+    mvKind_received: 'Received',
+    mvKind_receipt_corrected: 'Receipt corrected',
+    mvKind_built: 'Built',
+    mvKind_back_to_bench: 'Back to the bench',
+    mvKind_dispatched: 'Dispatched',
+    mvKind_arrived: 'Arrived',
+    mvKind_not_sent: 'Taken off the transfer',
+    mvKind_lost: 'Lost on the road',
+    mvKind_swapped: 'Chassis swapped',
+    mvKind_flipped: 'Quick transfer',
+    mvKind_sold: 'Sold',
+    mvKind_handed_over: 'Handed over',
+    mvKind_sale_undone: 'Sale undone',
+    mvKind_returned: 'Returned by the customer',
+    mvKind_traded_in: 'Taken in trade',
+    mvKind_rented: 'Rented out',
+    mvKind_rental_back: 'Back from rental',
+    mvKind_loaned: 'Loaned',
+    mvKind_loan_back: 'Back from loan',
+    mvKind_workshop_in: 'Into the workshop',
+    mvKind_workshop_out: 'Out of the workshop',
+    mvKind_written_off: 'Written off',
+    mvKind_to_provider: 'Returned to the supplier',
+    mvKind_adjusted: 'Adjustment',
+    mvKind_counted: 'Stock count',
+    mvKind_corrected: 'Correction',
+    mvKind_assembly: 'Assembly',
+    mvKind_service: 'Workshop',
+
+    planKind_rental: 'Rental',
+    planKind_appointment: 'Workshop appointment',
+    planKind_service: 'Service order',
+    planKind_loan: 'Loan',
+    planKind_reserved: 'Held by an order',
+    planKind_arrival: 'Expected arrival',
+
+    refType_transfers: 'Transfer #{id}',
+    refType_assembly: 'Assembly #{id}',
+    refType_orders: 'Order #{id}',
+    refType_sales: 'Order line #{id}',
+    refType_purchase_items: 'Purchase line #{id}',
+    refType_bookings: 'Rental #{id}',
+    refType_loans: 'Loan #{id}',
+    refType_stock_counts: 'Count #{id}',
+    refType_approvals: 'Approval #{id}',
+    refType_movements: 'Movement #{id}',
+
+    conflict_two_plans: 'Two plans at once: {with}',
+    conflict_not_there: 'It will not be there: {with}',
+    conflict_not_owned: 'No location owns it then',
+
+    mvRefused_MV001: 'No user in this session: sign in again.',
+    mvRefused_MV002: 'A movement cannot be dated before the unit’s last one ({last}): post a correction.',
+    mvRefused_MV010: 'A transfer leaves from the master.',
+    mvRefused_MV011: 'Transfer #{transfers_id} not found.',
+    mvRefused_MV012: 'Transfer #{transfers_id} has not been sent: it is {status}.',
+    mvRefused_MV013: 'Transfer #{transfers_id} is already on the road.',
+    mvRefused_MV014: 'A unit of transfer #{transfers_id} is not in the sender’s stock.',
+    mvRefused_MV015: 'Materials do not move through the stock ledger.',
+    mvRefused_MV016: 'Every serial-tracked line of the transfer needs its units.',
+    mvRefused_MV017: 'Only {have} in stock to send {want}.',
+    mvRefused_MV018: 'Transfer #{transfers_id} needs its expected arrival, a date and a time.',
+    mvRefused_MV020: 'Unit not found.',
+    mvRefused_MV021: 'This unit is not the assembly job’s.',
+    mvRefused_MV022: 'The unit is not on the bench: it is {state}.',
+    mvRefused_MV023: 'The unit stands at another location.',
+    mvRefused_MV024: 'The unit is held by {claim} and cannot go back to the bench.',
+    mvRefused_MV025: 'The unit is not in stock to go back to the bench: it is {state}.',
+  },
+
+  pt: {
+    unitWord_boxed: 'Recebido',
+    unitWord_unboxed: 'Revisado',
+    unitWord_assembling: 'Em montagem',
+    unitWord_built: 'Pronta',
+    unitWord_stock: 'No estoque',
+    unitWord_assigned: 'Atribuída',
+    unitWord_held: 'Em remessa',
+    unitWord_reserved: 'Reservada',
+    unitWord_fleet: 'Na frota',
+    unitWord_transit: 'Em trânsito',
+    unitWord_sold: 'Vendida',
+    unitWord_delivered: 'Com o cliente',
+    unitWord_rented: 'Na locação',
+    unitWord_loaned: 'Emprestada',
+    unitWord_provider: 'Devolvida ao fornecedor',
+    unitWord_workshop: 'Na oficina',
+    unitWord_written_off: 'Baixada',
+    unitWord_unknown: '—',
+
+    servicePhase_received: 'Recebida na oficina',
+    servicePhase_in_work: 'Em serviço',
+    servicePhase_finished: 'Pronta na oficina',
+
+    unitState_validating: 'em montagem',
+    unitState_available: 'disponível',
+    unitState_written_off: 'baixada',
+
+    claim_order: 'um pedido',
+    claim_draft: 'uma remessa em rascunho',
+    claim_fleet: 'a frota de locação',
+
+    place_master: 'Estoque Central',
+    place_location: '{name}',
+    place_road: 'A caminho de {to}',
+    place_customer: 'Com {name}',
+    place_supplier: 'No fornecedor {name}',
+    place_books: '—',
+
+    mvKind_opening: 'Saldo inicial',
+    mvKind_received: 'Recebida',
+    mvKind_receipt_corrected: 'Recebimento corrigido',
+    mvKind_built: 'Montada',
+    mvKind_back_to_bench: 'Voltou para a montagem',
+    mvKind_dispatched: 'Saiu na remessa',
+    mvKind_arrived: 'Chegou',
+    mvKind_not_sent: 'Tirada da remessa',
+    mvKind_lost: 'Perdida na estrada',
+    mvKind_swapped: 'Troca de chassi',
+    mvKind_flipped: 'Transferência rápida',
+    mvKind_sold: 'Vendida',
+    mvKind_handed_over: 'Entregue',
+    mvKind_sale_undone: 'Venda desfeita',
+    mvKind_returned: 'Devolvida pelo cliente',
+    mvKind_traded_in: 'Recebida na troca',
+    mvKind_rented: 'Alugada',
+    mvKind_rental_back: 'Voltou da locação',
+    mvKind_loaned: 'Emprestada',
+    mvKind_loan_back: 'Voltou do empréstimo',
+    mvKind_workshop_in: 'Entrou na oficina',
+    mvKind_workshop_out: 'Saiu da oficina',
+    mvKind_written_off: 'Baixada',
+    mvKind_to_provider: 'Devolvida ao fornecedor',
+    mvKind_adjusted: 'Ajuste',
+    mvKind_counted: 'Inventário',
+    mvKind_corrected: 'Correção',
+    mvKind_assembly: 'Montagem',
+    mvKind_service: 'Oficina',
+
+    planKind_rental: 'Locação',
+    planKind_appointment: 'Agendamento na oficina',
+    planKind_service: 'Ordem de serviço',
+    planKind_loan: 'Empréstimo',
+    planKind_reserved: 'Reservada para um pedido',
+    planKind_arrival: 'Chegada prevista',
+
+    refType_transfers: 'Remessa #{id}',
+    refType_assembly: 'Montagem #{id}',
+    refType_orders: 'Pedido #{id}',
+    refType_sales: 'Linha do pedido #{id}',
+    refType_purchase_items: 'Linha da compra #{id}',
+    refType_bookings: 'Locação #{id}',
+    refType_loans: 'Empréstimo #{id}',
+    refType_stock_counts: 'Inventário #{id}',
+    refType_approvals: 'Aprovação #{id}',
+    refType_movements: 'Movimento #{id}',
+
+    conflict_two_plans: 'Dois planos ao mesmo tempo: {with}',
+    conflict_not_there: 'A moto não estará lá: {with}',
+    conflict_not_owned: 'Nenhuma loja é dona dela então',
+
+    mvRefused_MV001: 'Nenhum usuário nesta sessão: entre pelo login.',
+    mvRefused_MV002: 'Um movimento não pode ser datado antes do último desta unidade ({last}): use uma correção.',
+    mvRefused_MV010: 'Uma remessa sai da matriz.',
+    mvRefused_MV011: 'Remessa #{transfers_id} não encontrada.',
+    mvRefused_MV012: 'A remessa #{transfers_id} não foi enviada: está {status}.',
+    mvRefused_MV013: 'A remessa #{transfers_id} já está na estrada.',
+    mvRefused_MV014: 'Uma moto da remessa #{transfers_id} não está no estoque de quem envia.',
+    mvRefused_MV015: 'Materiais não entram nos movimentos.',
+    mvRefused_MV016: 'Cada moto da remessa precisa da sua unidade.',
+    mvRefused_MV017: 'Há {have} em estoque para enviar {want}.',
+    mvRefused_MV018: 'A remessa #{transfers_id} precisa da chegada prevista, com data e hora.',
+    mvRefused_MV020: 'Unidade não encontrada.',
+    mvRefused_MV021: 'Esta moto não é a da montagem.',
+    mvRefused_MV022: 'A moto não está em montagem: está {state}.',
+    mvRefused_MV023: 'A moto está em outra loja.',
+    mvRefused_MV024: 'A moto está com {claim} e não volta à bancada.',
+    mvRefused_MV025: 'A moto não está no estoque para voltar à bancada: está {state}.',
+  },
+}
+
+/**
+ * A refusal's facts as i18n parameters. The facts that are themselves keys become words: a ledger state, a
+ * remessa's status (the module's shipState_<status>) and what holds a unit.
+ */
+export function refusalParams(t, facts = {}) {
+  const params = { ...facts }
+  if (facts.state) params.state = t('message.unitState_' + facts.state)
+  if (facts.status) params.status = t('message.shipState_' + facts.status)
+  if (facts.claim) params.claim = t('message.claim_' + facts.claim)
+  return params
+}

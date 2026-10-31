@@ -22,7 +22,8 @@ function check(string $what, bool $ok, mixed $seen = null): void
 }
 
 // a remessa from the master to Prudente: bike 503 and one helmet
-$transferId = (int) $pdo->query("INSERT INTO transfers (shop_purchases_id, status, location_id, to_location_id) VALUES (3, 'draft', 1, 2) RETURNING id")->fetchColumn();
+$transferId = (int) $pdo->query("INSERT INTO transfers (shop_purchases_id, status, location_id, to_location_id, expected_at)
+    VALUES (3, 'draft', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '1 day 16 hours') RETURNING id")->fetchColumn();
 $pdo->exec("INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty) VALUES ({$transferId}, 100, 10, 'MX-VERDE', 1), ({$transferId}, 200, 20, 'CAP-M', 1)");
 $pdo->exec("INSERT INTO transfer_units VALUES ({$transferId}, 503)");
 

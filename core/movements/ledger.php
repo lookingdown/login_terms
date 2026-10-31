@@ -9,7 +9,10 @@
 
 use Atlas\Query\Select;
 
-/** A refusal from the database: its code (MV0nn), the operator's Portuguese, and its facts. */
+/**
+ * A refusal from the database: its code (MV0nn), which is its i18n key (mvRefused_<code>); an English message,
+ * for the log; and its facts, the key's parameters.
+ */
 final class MovementRefused extends RuntimeException
 {
     public function __construct(

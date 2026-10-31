@@ -68,14 +68,25 @@ SELECT (SELECT count(*) FROM cube_dots(tsrange(date_trunc('second', LOCALTIMESTA
                                        p_units => '{504}')) AS at_the_moment;
 ROLLBACK;
 
-\echo '== 11. encounters that cannot happen. Expect two: bike 500 still on the road at its appointment, bike 502 rented and in service at once.'
+\echo '== 11. encounters that cannot happen. Expect two: bike 500 still on the road at its appointment tomorrow (not_there,'
+\echo '       road:55: it is expected the day after), bike 502 rented and in service at once (two_plans).'
 SELECT serials_id, kind, ref_id, conflict, with_what, at FROM unit_waypoint_conflicts ORDER BY serials_id, kind;
 
-\echo '== 12. an arrival dated before the unit''s last stay began. Expect MV002.'
+\echo '== 12. the road''s forward end. Bike 500 gets an appointment after its expected arrival, and one that was cancelled.'
+\echo '       Expect still the two encounters, and bike 500''s plans: the appointment tomorrow, its arrival, the one after it.'
+SET session_replication_role = replica;
+INSERT INTO workshop_appointments (starts_at, customers_id, serials_id, location_id, kind, status)
+VALUES (date_trunc('day', LOCALTIMESTAMP) + interval '3 days 10 hours', 7, 500, 2, 'revisao', 'scheduled'),
+       (date_trunc('day', LOCALTIMESTAMP) + interval '1 day 15 hours', 7, 500, 2, 'revisao', 'cancelled');
+SET session_replication_role = origin;
+SELECT count(*) AS encounters FROM unit_waypoint_conflicts;
+SELECT layer, place, starts, why, ref FROM cube_dots(p_units => '{500}', p_layers => '{plan}');
+
+\echo '== 13. an arrival dated before the unit''s last stay began. Expect MV002.'
 WITH m AS (INSERT INTO movements (kind, occurred_at, users_id) VALUES ('arrived', '2026-10-05', 1) RETURNING id)
 INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, at_transfer_id, owner_location_id, state)
 SELECT m.id, 100, 500, x.q, x.l, x.t, 1, 'available' FROM m, (VALUES (-1, NULL::int4, 55::int8), (1, 2, NULL)) x(q, l, t);
 
-\echo '== 13. a second stay over the first, written by hand. Expect the temporal key to refuse it.'
+\echo '== 14. a second stay over the first, written by hand. Expect the temporal key to refuse it.'
 INSERT INTO unit_residence (serials_id, at_location_id, owner_location_id, state, during, movements_id)
 SELECT 500, 2, 2, 'available', tsrange('2026-10-02', '2026-10-03'), min(id) FROM movements;

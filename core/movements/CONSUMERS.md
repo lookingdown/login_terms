@@ -128,14 +128,15 @@ cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);    // advanced: the
   post a correction. `$with` carries what the event needs.
 - An unknown action or a missing need throws `InvalidArgumentException` before anything is sent.
 - **The database holds the rules.** A refusal throws `MovementRefused`, and nothing is posted. It carries
-  `sqlState` (`MV0nn`), the operator's Portuguese as its message, and `facts`.
+  `sqlState` (`MV0nn`), an English message for the log, and `facts`. The code is the i18n key: the screen shows
+  `t('message.mvRefused_' + code, refusalParams(t, facts))`, with the words in `i18n/movements.js`.
 - Inside the caller's transaction the action takes a savepoint, so a refusal undoes that event alone. A
   module lets the `MovementRefused` reach lib.php, like every other event.
 
 | action | needs | refused when |
 |---|---|---|
 | `built` | `assembly` | MV020 the unit is unknown; MV021 it is not the job's; MV022 it is not validating where its owner stands; MV023 it is another shop's |
-| `back_to_bench` | `assembly` | MV020–MV023 as `built`, from available; MV024 an order, a remessa draft or the fleet holds it |
+| `back_to_bench` | `assembly` | MV020, MV021 and MV023 as `built`; MV025 it is not available where its owner stands; MV024 an order, a remessa draft or the fleet holds it |
 
 The actions to come, each on the same pattern (plan §2, code §4). The needs are a proposal:
 

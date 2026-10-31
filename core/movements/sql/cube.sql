@@ -55,7 +55,7 @@ BEGIN
     SELECT occurred_at, corrects_id INTO v_at, v_corrects FROM movements WHERE id = NEW.movements_id;
     SELECT max(lower(during)) INTO v_last FROM unit_residence WHERE serials_id = NEW.serials_id;
     IF v_corrects IS NULL AND v_at < v_last THEN
-        PERFORM mv_refuse('MV002', 'Um movimento não pode ser datado antes do último desta unidade: use uma correção.',
+        PERFORM mv_refuse('MV002', 'A movement cannot be dated before the unit''s last one: post a correction.',
                           jsonb_build_object('serials_id', NEW.serials_id, 'occurred_at', v_at, 'last', v_last));
     END IF;
     PERFORM unit_residence_rebuild(NEW.serials_id);
@@ -66,7 +66,8 @@ CREATE TRIGGER movement_legs_residence AFTER INSERT ON public.movement_legs
     EXECUTE FUNCTION public.movement_legs_residence();
 
 -- Intent: the stays the documents plan, with what really happened beside them where the document
--- records it (scheduled and actual, the crew roster's pair). An appointment is a moment, not a stay.
+-- records it (scheduled and actual, the crew roster's pair). An appointment and an arrival are moments.
+-- What will not happen is no plan: a cancelled or missed appointment, a cancelled service order.
 CREATE VIEW public.unit_waypoints WITH (security_invoker = true) AS
 SELECT r.serials_id::int4 AS serials_id, 'rental'::text AS kind, b.id::int8 AS ref_id,
        'customer'::text AS place_kind, NULL::int4 AS location_id, b.customer_id AS customers_id,
@@ -78,13 +79,13 @@ UNION ALL
 SELECT a.serials_id, 'appointment', a.id, 'location', a.location_id, a.customers_id,
        tsrange(a.starts_at, a.starts_at, '[]'), NULL
   FROM workshop_appointments a
- WHERE a.serials_id IS NOT NULL
+ WHERE a.serials_id IS NOT NULL AND a.status NOT IN ('cancelled', 'no_show')
 UNION ALL
 SELECT so.serials_id, 'service', so.id, 'location', so.location_id, so.customers_id,
        tsrange(so.scheduled_date, COALESCE(so.expected_date, so.scheduled_date) + 1),
        CASE WHEN so.completed_date IS NOT NULL THEN tsrange(so.scheduled_date, so.completed_date, '[]') END
   FROM service_orders so
- WHERE so.serials_id IS NOT NULL AND so.scheduled_date IS NOT NULL
+ WHERE so.serials_id IS NOT NULL AND so.scheduled_date IS NOT NULL AND so.service_status <> 'cancelled'
 UNION ALL
 SELECT l.serials_id::int4, 'loan', l.id, 'customer', NULL, NULL,
        tsrange(COALESCE(l.out_at, l.created_at), l.due_at + 1),
@@ -96,33 +97,49 @@ SELECT sa.serials_id, 'reserved', o.id, 'location', o.location_id, o.customers_i
        tsrange(o.created_at, o.reserved_until), NULL
   FROM orders o JOIN sales sa ON sa.orders_id = o.id
  WHERE sa.serials_id IS NOT NULL AND o.reserved_until > o.created_at AND o.deleted_at IS NULL
-   AND o.status NOT IN ('cancelled', 'refunded', 'voided');
+   AND o.status NOT IN ('cancelled', 'refunded', 'voided')
+UNION ALL
+-- a remessa's units, expected at its destination: the road's forward end, beside when each arrived
+SELECT l.serials_id, 'arrival', t.id, 'location', t.to_location_id, NULL,
+       tsrange(t.expected_at, t.expected_at, '[]'),
+       (SELECT tsrange(m.occurred_at, m.occurred_at, '[]')
+          FROM movement_legs a JOIN movements m ON m.id = a.movements_id
+         WHERE a.serials_id = l.serials_id AND a.qty = 1 AND a.at_location_id = t.to_location_id
+           AND m.kind = 'arrived' AND m.ref_type = 'transfers' AND m.ref_id = t.id
+         ORDER BY m.occurred_at LIMIT 1)
+  FROM movement_legs l JOIN transfers t ON t.id = l.at_transfer_id
+ WHERE l.serials_id IS NOT NULL AND l.qty = 1 AND t.expected_at IS NOT NULL;
 
--- Encounters that cannot happen (each must answer nothing):
---   two plans that hold one unit at the same moment;
---   a plan at a place where, at that moment, the unit will not be (it is elsewhere, or on its way);
---   a rental or a loan of a unit no location owns at that moment (sold, or with its customer).
+-- Encounters that cannot happen, from now on (each must answer nothing). conflict is a key, with_what a
+-- coordinate: what a person reads is the i18n's (conflict_<key>).
+--   two_plans  two plans that hold one unit at the same moment;
+--   not_there  a plan at a place where, at that moment, the unit will not be: it stands elsewhere, or it is
+--              on a road that is not expected there by then;
+--   not_owned  a rental or a loan of a unit no location owns at that moment (sold, or with its customer).
 CREATE VIEW public.unit_waypoint_conflicts WITH (security_invoker = true) AS
-SELECT a.serials_id, a.kind, a.ref_id, 'two plans at once'::text AS conflict,
-       b.kind || ' ' || b.ref_id AS with_what, lower(a.planned * b.planned) AS at
+SELECT a.serials_id, a.kind, a.ref_id, 'two_plans'::text AS conflict,
+       b.kind || ':' || b.ref_id AS with_what, lower(a.planned * b.planned) AS at
   FROM unit_waypoints a
   JOIN unit_waypoints b ON b.serials_id = a.serials_id AND (a.kind, a.ref_id) < (b.kind, b.ref_id)
- WHERE a.planned && b.planned
+ WHERE a.planned && b.planned AND 'arrival' NOT IN (a.kind, b.kind)
+   AND (upper(a.planned * b.planned) > LOCALTIMESTAMP OR upper_inf(a.planned * b.planned))
 UNION ALL
-SELECT w.serials_id, w.kind, w.ref_id, 'the unit will not be there',
-       COALESCE('location ' || r.at_location_id, 'road ' || r.at_transfer_id, 'customer ' || r.at_customer_id,
-                'supplier ' || r.at_supplier_id, 'nowhere known'), lower(w.planned)
+SELECT w.serials_id, w.kind, w.ref_id, 'not_there',
+       COALESCE('location:' || r.at_location_id, 'road:' || r.at_transfer_id, 'customer:' || r.at_customer_id,
+                'supplier:' || r.at_supplier_id, 'books'), lower(w.planned)
   FROM unit_waypoints w
   LEFT JOIN unit_residence r ON r.serials_id = w.serials_id AND r.during @> lower(w.planned)
+  LEFT JOIN transfers t ON t.id = r.at_transfer_id
  WHERE w.place_kind = 'location' AND w.kind IN ('appointment', 'reserved')
    AND upper(w.planned) > LOCALTIMESTAMP
    AND r.at_location_id IS DISTINCT FROM w.location_id
+   AND NOT COALESCE(t.to_location_id = w.location_id AND t.expected_at <= lower(w.planned), false)
 UNION ALL
-SELECT w.serials_id, w.kind, w.ref_id, 'no location owns the unit then', 'owner customer ' || r.owner_customer_id,
-       lower(w.planned)
+SELECT w.serials_id, w.kind, w.ref_id, 'not_owned', 'customer:' || r.owner_customer_id, lower(w.planned)
   FROM unit_waypoints w
   JOIN unit_residence r ON r.serials_id = w.serials_id AND r.during && w.planned
- WHERE w.kind IN ('rental', 'loan') AND r.owner_location_id IS NULL;
+ WHERE w.kind IN ('rental', 'loan') AND r.owner_location_id IS NULL
+   AND (upper(w.planned) > LOCALTIMESTAMP OR upper_inf(w.planned));
 
 -- The axes. The cube is dots: a unit, in a place, of an owner, in a state, for a stretch of time, for a
 -- reason. One function cuts it along any axes and always answers dots. Each axis is optional: left out it

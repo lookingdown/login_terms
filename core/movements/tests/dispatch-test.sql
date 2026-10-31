@@ -24,8 +24,11 @@ VALUES (500, 100, '9C2KC1650PR000001', 'stock', 1), (501, 100, '9C2KC1650PR00000
        (504, 100, '9C2KC1650PR000005', 'assembly', 1);
 INSERT INTO assembly (id, variants_id, serials_id, stage, location_id) OVERRIDING SYSTEM VALUE
 VALUES (81, 100, 504, 'in_process', 1), (82, 100, 501, 'delivered', 1);
-INSERT INTO transfers (id, shop_purchases_id, status, location_id, to_location_id) OVERRIDING SYSTEM VALUE
-VALUES (55, 1, 'draft', 1, 2), (56, 2, 'sent', 1, 2);
+-- 55 and 56 expected at Prudente the day after tomorrow at 09:00; 57 was sent without an expected arrival
+INSERT INTO transfers (id, shop_purchases_id, status, location_id, to_location_id, expected_at) OVERRIDING SYSTEM VALUE
+VALUES (55, 1, 'draft', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '2 days 9 hours'),
+       (56, 2, 'sent', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '2 days 9 hours'),
+       (57, 4, 'sent', 1, 2, NULL);
 INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty)
 VALUES (55, 100, 10, 'MX-VERDE', 1), (55, 200, 20, 'CAP-M', 2), (56, 200, 20, 'CAP-M', 9);
 INSERT INTO transfer_units VALUES (55, 500);
@@ -60,35 +63,37 @@ SELECT movement_dispatch(55);
 SELECT movement_dispatch(55);
 \echo '== 5. nine helmets when three are left. Expect MV017, its facts on one line.'
 SELECT movement_dispatch(56);
-\echo '== 6. where things are now: bike 500 on road 55, still the master''s; two helmets beside it'
+\echo '== 6. a remessa without an expected arrival. Expect MV018.'
+SELECT movement_dispatch(57);
+\echo '== 7. where things are now: bike 500 on road 55, still the master''s; two helmets beside it'
 SELECT serials_id, place_kind, transfers_id, owner_location_id, state FROM unit_positions WHERE serials_id = 500;
 SELECT variants_id, coalesce('location ' || at_location_id, 'road ' || at_transfer_id, 'the books') AS cell, owner_location_id AS owner, qty
   FROM positions ORDER BY variants_id, cell;
-\echo '== 7. sellable at the master: three bikes, one on an unpaid order, one paid line waiting. Expect bikes 1, helmets 3.'
+\echo '== 8. sellable at the master: three bikes, one on an unpaid order, one paid line waiting. Expect bikes 1, helmets 3.'
 SELECT location_id, variants_id, qty AS sellable FROM stock_sellable ORDER BY variants_id;
-\echo '== 8. the time axis: the master on 15 Oct, and where bike 500 stood then and stands now.'
+\echo '== 9. the time axis: the master on 15 Oct, and where bike 500 stood then and stands now.'
 SELECT * FROM stock_at('2026-10-15') ORDER BY 1, 2;
 SELECT 'then: ' || coalesce('location ' || at_location_id, 'road ' || at_transfer_id) AS unit_500 FROM unit_at(500, '2026-10-15')
 UNION ALL
 SELECT 'now:  ' || coalesce('location ' || at_location_id, 'road ' || at_transfer_id) FROM unit_at(500, LOCALTIMESTAMP);
-\echo '== 9. the health checks. Expect every count 0.'
+\echo '== 10. the health checks. Expect every count 0.'
 SELECT (SELECT count(*) FROM movement_check_balance) AS balance, (SELECT count(*) FROM movement_check_chain) AS chain,
        (SELECT count(*) FROM movement_check_positions) AS positions, (SELECT count(*) FROM movement_check_serial_mix) AS serial_mix,
        (SELECT count(*) FROM movement_check_roads) AS roads;
-\echo '== 10. a leg edited by hand. Expect refused.'
+\echo '== 11. a leg edited by hand. Expect refused.'
 UPDATE movement_legs SET qty = 2 WHERE id = 1;
-\echo '== 11. an unknown unit is built. Expect MV020.'
+\echo '== 12. an unknown unit is built. Expect MV020.'
 SELECT movement_built(999999, 81);
-\echo '== 12. bike 500 built by the job of bike 504. Expect MV021.'
+\echo '== 13. bike 500 built by the job of bike 504. Expect MV021.'
 SELECT movement_built(500, 81);
-\echo '== 13. bike 504 back to the bench while it is on it. Expect MV022.'
+\echo '== 14. bike 504 back to the bench while it is on it. Expect MV025.'
 SELECT movement_back_to_bench(504, 81);
-\echo '== 14. bike 504 built from Prudente''s seat. Expect MV023.'
+\echo '== 15. bike 504 built from Prudente''s seat. Expect MV023.'
 SELECT set_config('app.location', '2', false) \g /dev/null
 SELECT movement_built(504, 81);
 SELECT set_config('app.location', '1', false) \g /dev/null
-\echo '== 15. bike 501 back to the bench: order 900 holds it. Expect MV024.'
+\echo '== 16. bike 501 back to the bench: order 900 holds it. Expect MV024.'
 SELECT movement_back_to_bench(501, 82);
-\echo '== 16. an empty app.user. Expect MV001.'
+\echo '== 17. an empty app.user. Expect MV001.'
 SELECT set_config('app.user', '', false) \g /dev/null
 SELECT movement_dispatch(56);
