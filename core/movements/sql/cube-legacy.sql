@@ -79,7 +79,18 @@ SELECT 'service orders (with a unit)', count(*) FILTER (WHERE completed_date IS 
        max(completed_date::date - scheduled_date), count(*) FILTER (WHERE completed_date IS NULL)
   FROM service_orders WHERE serials_id IS NOT NULL AND scheduled_date IS NOT NULL;
 
-\echo '== 5. what the history cannot say: the handovers (where a sold bike is) and the remessas'' expected arrivals'
+\echo '== 5. what the history cannot say: the handovers (where a sold bike is); and the remessas'' expected arrivals,'
+\echo '       which dispatch writes on the shop''s order (purchases.expected), the dispatch day unless one is given'
 SELECT (SELECT count(*) FROM legacy_sales) AS units_paid,
-       (SELECT count(*) FROM sales WHERE serials_id IS NOT NULL AND delivered_date IS NOT NULL) AS handovers_recorded,
-       (SELECT count(*) FROM transfers) AS remessas, 0 AS with_an_expected_arrival;
+       (SELECT count(*) FROM sales WHERE serials_id IS NOT NULL AND delivered_date IS NOT NULL) AS handovers_recorded;
+WITH r AS (
+    SELECT t.id, sp.expected, sp.received,
+           (SELECT min(st.created_at)::date FROM stock st
+             WHERE st.ref_type = 'transfers' AND st.ref_id = t.id AND st.location_id = t.location_id AND st.qty < 0) AS dispatched_on
+      FROM transfers t JOIN purchases sp ON sp.id = t.shop_purchases_id)
+SELECT count(*) AS remessas, count(expected) AS with_an_expected_arrival,
+       count(*) FILTER (WHERE expected = dispatched_on) AS on_the_dispatch_day,
+       count(*) FILTER (WHERE expected < dispatched_on) AS before_it,
+       count(*) FILTER (WHERE expected > dispatched_on) AS set_ahead,
+       count(*) FILTER (WHERE received > expected) AS received_after_it
+  FROM r;

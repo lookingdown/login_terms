@@ -294,7 +294,7 @@ CREATE FUNCTION public.movement_back_to_bench(p_serials_id int4, p_assembly_id i
     SELECT movement_assembly_state(p_serials_id, p_assembly_id, 'validating')
 $$;
 
--- The unit's position on the layer (the step-C definition; step A defines the same columns on today's tables).
+-- The unit's position on the layer: where, whose, its state and since when.
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
        l.serials_id, s.serial_number, l.variants_id, v.sku,

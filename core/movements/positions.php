@@ -2,12 +2,11 @@
 /**
  * core/movements/positions.php — the reading side of the movement layer (movements-code.md §2).
  *
- * The views are the contract: the same names, columns and answers on today's tables (step A)
- * and on the layer (step C). A list screen starts from a positions*() Select and narrows,
- * pages, joins or nests it; a single answer comes from a function here.
+ * The views are defined once, on the layer; the screens get them in the shapes of CONTRACT.md.
+ * A list screen starts from a positions*() Select and narrows, pages, joins or nests it; a single
+ * answer comes from a function here.
  *
- * This is now, the cut today's screens read. Any other moment, a unit's line and the plans ahead
- * are the cube (cube.php).
+ * This is now. Any other moment, a unit's line and the plans ahead are the cube (cube.php).
  */
 
 use Atlas\Query\Select;

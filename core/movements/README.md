@@ -15,8 +15,9 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 |---|---|---|
 | `movements.php` | the one require: `require_once '/var/sys/core/movements/movements.php';` | |
 | `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()`, `movementBuilt()`, `movementBackToBench()` | C |
-| `positions.php` | the reading side at now: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | A |
+| `positions.php` | the reading side at now: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | C |
 | `cube.php` | the cube's door (`CONSUMERS.md`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, `cubeConflicts()` | B |
+| `CONTRACT.md` | who reads and who writes: inventory-master's functions and the four core kernels, mapped to the layer, with the shapes in and out and the differences from today, explained | C |
 | `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
 | `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `unit_waypoints`, `unit_waypoint_conflicts`, `cube_dots()` (one parameter per axis) | B |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
@@ -84,8 +85,11 @@ These are the names and arguments of code §4, written on `movement_dispatch`'s 
 - `movementWriteOff`; `movementToProvider($pdo, $serialId, $supplierId, …)`; `movementAdjust`; `movementCountClose`; `movementCorrect`; `movementUnitRemove`
 - `claimHold` / `claimRelease` (`transfer_units`); `claimSale` / `claimSaleRelease`, which refuses a unit still in assembly. Assembly's own job-to-unit link isn't a claim. `claimFleet` / `claimFleetRelease`.
 
-## Step A
-`positions.php` is step A's code. In step A the same functions read the same view names and columns, defined on today's tables. Those definitions must answer what today's readers answer (serialState.php, stockUnits.php, the stockLedger.php readers), module by module, so I write them from those files.
+## No step A (Johan, 2026-10-31)
+Step A defined the read interface on today's tables first, with the rule that every read answers the same before and after. That rule would have rebuilt what is being replaced, so step A goes:
+- The interface is defined once, on the layer, in the shapes of `CONTRACT.md`: each designed from what its screen needs.
+- The readers move in step C together with the writers.
+- The proof is a rehearsal on a copy of the live data. Every difference between today's answer and the new one is explained (CONTRACT.md lists them), and an unexplained one is a bug.
 
 ## What changed from revision 1
 - functions in one place, `core/movements/` (`ledger.php`, `positions.php`, one loader), not a `Movements` namespace of classes

@@ -98,13 +98,13 @@ What the cut shows:
 - **A bad date surfaces.** Of 47 purchases with an expected date, 16 were late. One was 1,461 days late: a mistyped year.
 - **The workshop.** Of 9 service orders with a bike, 5 are done (3 late, by up to 2 days) and 4 are open since August and September.
 - **An entity without an identity has no line.** CDV holds no unit in any slice, yet it sold 8 MINI DRIFT: they moved as quantities, without units (diagnostics D7, D8).
-- **What the history cannot say.** 77 bikes were paid for and 1 handover was recorded, so where a sold bike is, at the shop or with its customer, is not known. None of the 28 remessas has an expected arrival.
+- **What the history cannot say.** 77 bikes were paid for and 1 handover was recorded, so where a sold bike is, at the shop or with its customer, is not known. Every remessa carries an expected arrival, on the shop's order: 23 of the 28 are the dispatch day itself (dispatch's default), 5 fall before it, and none was set ahead.
 
 ## What makes the cube whole
 
 Small, and in the documents rather than in the layer:
 
-1. **A remessa's expected arrival** (a date on `transfers`). The road then has a forward end, so "will the bike be at Prudente on Saturday?" has an answer.
+1. **A remessa's expected arrival, asked at dispatch.** The shop's order already has the field (`purchases.expected`), which dispatch fills with the day it leaves. With a real date the road has a forward end, so "will the bike be at Prudente on Saturday?" has an answer.
 2. **The handover as an event.** It already is one in the plan (`movementHandOver`), and then a sold bike's place is known.
 3. **An assembly job's expected ready date.** The validating stay gets a planned end: the green bike that is ready on Monday.
 4. **A unit for every bike that moves.** That is the discrepancies settled before the opening.
@@ -120,6 +120,6 @@ Small, and in the documents rather than in the layer:
 - **`unit_waypoints`:** the roster, read from bookings, appointments, service orders, loans and orders' holds, with the actual beside the planned where the document records it.
 - **`unit_waypoint_conflicts`:** the encounters that cannot happen.
 - **`cube_dots()`:** the axes, one parameter each. It draws the facts from the legs, so the second clock comes with it, and so do the instants: two events of a unit in one second leave a stay of no length, which is on the unit's line and in a period, never at a moment.
-- **In PHP** (`cube.php`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, and `cubeConflicts()`. The Selects narrow, page, join and nest like the other readers. `positions.php` stays the cut at now that today's screens read.
+- **In PHP** (`cube.php`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, and `cubeConflicts()`. The Selects narrow, page, join and nest like the other readers. `positions.php` is the cut at now. `CONTRACT.md` gives the screens their shapes.
 
 Counted goods have no identity and so no line. They live in the same cube by quantity: `positions` is now, `stock_at(t)` is the slice, and the road of a remessa holds what is on it.

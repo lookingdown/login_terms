@@ -161,8 +161,8 @@ others), and the dots they leave read like any other.
 
 - **Counted goods** (a helmet) have no identity, so they have no line and no dot. They are quantities:
   `positions` now, `stock_at(t)` at a moment, `positionsRoad()` on a road.
-- **Some lines have no forward end yet.** A remessa has no expected arrival, an appointment has no length,
-  and a sold bike's handover is not recorded. CUBE.md lists what would make them whole.
+- **Some lines have no forward end yet.** A remessa's expected arrival is the dispatch day unless one is given,
+  an appointment has no length, and a sold bike's handover is not recorded. CUBE.md lists what would make them whole.
 - **A seat sees its part.** RLS cuts the cube before the axes do. A shop's seat sees the dots at its floor
   and on the roads to and from it; the master sees everything.
 
