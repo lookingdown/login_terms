@@ -80,3 +80,21 @@ function movementDispatch(PDO $pdo, int $transferId): array
 {
     return movementCall($pdo, 'movement_dispatch', [[$transferId, 'bigint']]);
 }
+
+/**
+ * Events 3 and 4, assembly passed and failed: only the state changes, where the bike stands, by its
+ * assembly job. Refused: not this job's unit, not in that state, another location's bike, and back to the
+ * bench for a claimed unit (an order, a remessa draft, the fleet).
+ *
+ * @return array{state: string}
+ */
+function movementBuilt(PDO $pdo, int $serialId, int $assemblyId): array
+{
+    return movementCall($pdo, 'movement_built', [[$serialId, 'integer'], [$assemblyId, 'bigint']]);
+}
+
+/** @return array{state: string} */
+function movementBackToBench(PDO $pdo, int $serialId, int $assemblyId): array
+{
+    return movementCall($pdo, 'movement_back_to_bench', [[$serialId, 'integer'], [$assemblyId, 'bigint']]);
+}

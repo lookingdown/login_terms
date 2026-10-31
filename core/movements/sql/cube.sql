@@ -1,11 +1,10 @@
 -- The time axis of the movement layer: the cube's fourth dimension.
 --
--- A unit's life is a line through where · owner · state over time. Here it is stored three ways:
+-- A unit's life is a line through where · owner · state over time. Here it is kept three ways:
 --   facts      unit_residence: one row per stay in a cell, [from, to); the open stay is now.
 --   intent     unit_waypoints: the stays its documents plan (a rental, an appointment, a service
 --              order, a loan, an order's hold): the roster, with what really happened beside it.
---   slices     whereabouts(t[, known_at]): every unit at one moment, as known now or as the books
---              stood at known_at; the future is the current stay plus its waypoints.
+--   the axes   cube_dots(): any cut through facts and plans, as known now or as the books stood then.
 -- Runs after layer.sql. PostgreSQL 18; btree_gist for the temporal key.
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;
@@ -99,53 +98,6 @@ SELECT sa.serials_id, 'reserved', o.id, 'location', o.location_id, o.customers_i
  WHERE sa.serials_id IS NOT NULL AND o.reserved_until > o.created_at AND o.deleted_at IS NULL
    AND o.status NOT IN ('cancelled', 'refunded', 'voided');
 
--- One unit, one moment: every unit's cell at p_at. As known now by default; with p_known_at, as the books
--- stood then (only what had been recorded by then: the system time beside the business time). A moment
--- after now finds the current stay, which runs on, with the waypoint the documents plan for that moment.
-CREATE FUNCTION public.whereabouts(p_at timestamp DEFAULT LOCALTIMESTAMP, p_known_at timestamp DEFAULT NULL)
-RETURNS TABLE (serials_id int4, place_kind text, location_id int4, transfers_id int8, customers_id int4,
-               suppliers_id int8, owner_location_id int4, owner_customer_id int4, state text, since timestamp,
-               waypoint text, waypoint_ref int8, waypoint_location_id int4)
-    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
-    WITH fact AS (
-        SELECT r.serials_id, r.at_location_id, r.at_transfer_id, r.at_customer_id, r.at_supplier_id,
-               r.owner_location_id, r.owner_customer_id, r.state, lower(r.during) AS since
-          FROM unit_residence r
-         WHERE p_known_at IS NULL AND r.during @> p_at
-        UNION ALL
-        (SELECT DISTINCT ON (l.serials_id) l.serials_id, l.at_location_id, l.at_transfer_id, l.at_customer_id,
-                l.at_supplier_id, l.owner_location_id, l.owner_customer_id, l.state, m.occurred_at
-           FROM movement_legs l JOIN movements m ON m.id = l.movements_id
-          WHERE p_known_at IS NOT NULL AND l.serials_id IS NOT NULL AND l.qty = 1
-            AND m.occurred_at <= p_at AND m.recorded_at <= p_known_at
-          ORDER BY l.serials_id, m.occurred_at DESC, l.id DESC))
-    SELECT f.serials_id,
-           CASE WHEN f.at_location_id IS NOT NULL THEN 'location' WHEN f.at_transfer_id IS NOT NULL THEN 'road'
-                WHEN f.at_customer_id IS NOT NULL THEN 'customer' WHEN f.at_supplier_id IS NOT NULL THEN 'supplier'
-                ELSE 'the books' END,
-           f.at_location_id, f.at_transfer_id, f.at_customer_id, f.at_supplier_id,
-           f.owner_location_id, f.owner_customer_id, f.state, f.since,
-           w.kind, w.ref_id, w.location_id
-      FROM fact f
-      LEFT JOIN LATERAL (SELECT * FROM unit_waypoints w WHERE w.serials_id = f.serials_id AND w.planned @> p_at
-                          ORDER BY lower(w.planned) DESC LIMIT 1) w ON true
-$$;
-
--- A unit's life in order: its stays, then what its documents plan from here on.
-CREATE VIEW public.unit_trajectory WITH (security_invoker = true) AS
-SELECT r.serials_id, 'fact'::text AS layer, lower(r.during) AS starts, upper(r.during) AS ends,
-       CASE WHEN r.at_location_id IS NOT NULL THEN 'location' WHEN r.at_transfer_id IS NOT NULL THEN 'road'
-            WHEN r.at_customer_id IS NOT NULL THEN 'customer' WHEN r.at_supplier_id IS NOT NULL THEN 'supplier'
-            ELSE 'the books' END AS place_kind,
-       COALESCE(r.at_location_id::int8, r.at_transfer_id, r.at_customer_id::int8, r.at_supplier_id) AS place_id,
-       r.owner_location_id, r.owner_customer_id, r.state, m.kind AS how, r.movements_id AS ref_id
-  FROM unit_residence r JOIN movements m ON m.id = r.movements_id
-UNION ALL
-SELECT w.serials_id, 'plan', lower(w.planned), upper(w.planned), w.place_kind,
-       COALESCE(w.location_id::int8, w.customers_id::int8), NULL, NULL, NULL, w.kind, w.ref_id
-  FROM unit_waypoints w
- WHERE upper(w.planned) > LOCALTIMESTAMP OR upper_inf(w.planned);
-
 -- Encounters that cannot happen (each must answer nothing):
 --   two plans that hold one unit at the same moment;
 --   a plan at a place where, at that moment, the unit will not be (it is elsewhere, or on its way);
@@ -176,15 +128,21 @@ SELECT w.serials_id, w.kind, w.ref_id, 'no location owns the unit then', 'owner 
 -- reason. One function cuts it along any axes and always answers dots. Each axis is optional: left out it
 -- is whole; given as a point it cuts; given as a range or a set it widens.
 --   p_time      a moment '[t,t]' or a period '[a,b)': the dots that touch it
---   p_units     units (serials_id)                p_models   every unit of these models (variants_id)
---   p_places    places as 'location:2', 'road:55', 'customer:7', 'supplier:3'
---   p_customer  a customer: the dots where it is the place or the owner, and the plans it is in
---   p_known_at  the second clock: the facts as the books stood then
--- Facts are the stays from the legs; plans are the waypoints. A dot's place and owner are 'kind:id'.
+--   p_units     units (serials_id)                p_models     every unit of these models (variants_id)
+--   p_places    'location:2', 'road:55', 'customer:7', 'supplier:3', 'books'
+--   p_owners    the same coordinates: whose       p_states     'validating', 'available', 'written_off'
+--   p_customers the dots a customer is the place or the owner of, and the plans it is in
+--   p_layers    'fact', 'plan'                    p_known_at   the second clock: the facts as the books stood then
+-- Facts are the stays from the legs; plans are the waypoints, which have a place but no owner or state.
+-- A dot is always (unit, model, layer, place, owner, state, starts, ends, why, ref, customer); why and ref
+-- say what put it there: a fact's movement (its kind and id), a plan's document. In order: by unit, then by time.
+-- Two events of a unit in one second leave a stay of no length, an instant (starts = ends). It is on the
+-- unit's line and in a period, never at a moment: at a moment a unit stands in one cell.
 CREATE FUNCTION public.cube_dots(p_time tsrange DEFAULT NULL, p_units int4[] DEFAULT NULL, p_models int8[] DEFAULT NULL,
-                            p_places text[] DEFAULT NULL, p_customer int4 DEFAULT NULL, p_known_at timestamp DEFAULT NULL)
-RETURNS TABLE (serials_id int4, variants_id int8, layer text, place text, owner text, state text,
-               starts timestamp, ends timestamp, why text, ref_id int8, customers_id int4)
+                                 p_places text[] DEFAULT NULL, p_owners text[] DEFAULT NULL, p_states text[] DEFAULT NULL,
+                                 p_customers int4[] DEFAULT NULL, p_layers text[] DEFAULT NULL, p_known_at timestamp DEFAULT NULL)
+RETURNS TABLE (unit int4, model int8, layer text, place text, owner text, state text,
+               starts timestamp, ends timestamp, why text, ref int8, customer int4)
     LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
     WITH facts AS (
         SELECT l.serials_id, l.variants_id, 'fact'::text AS layer,
@@ -197,31 +155,37 @@ RETURNS TABLE (serials_id int4, variants_id int8, layer text, place text, owner 
                     WHEN l.owner_customer_id IS NOT NULL THEN 'customer:' || l.owner_customer_id
                     WHEN l.owner_supplier_id IS NOT NULL THEN 'supplier:' || l.owner_supplier_id
                     ELSE 'books' END AS owner,
-               l.state::text AS state,
-               tsrange(m.occurred_at, lead(m.occurred_at) OVER (PARTITION BY l.serials_id ORDER BY m.occurred_at, l.id)) AS during,
-               m.kind AS why, l.movements_id AS ref_id, COALESCE(l.at_customer_id, l.owner_customer_id) AS customers_id
+               l.state::text AS state, m.occurred_at AS starts, lead(m.occurred_at) OVER line AS ends,
+               tsrange(m.occurred_at, lead(m.occurred_at) OVER line) AS during,
+               m.kind AS why, l.movements_id AS ref_id, COALESCE(l.at_customer_id, l.owner_customer_id) AS customers_id,
+               l.id AS seq
           FROM movement_legs l JOIN movements m ON m.id = l.movements_id
-         WHERE l.serials_id IS NOT NULL AND l.qty = 1 AND (p_known_at IS NULL OR m.recorded_at <= p_known_at)),
+         WHERE l.serials_id IS NOT NULL AND l.qty = 1 AND (p_known_at IS NULL OR m.recorded_at <= p_known_at)
+        WINDOW line AS (PARTITION BY l.serials_id ORDER BY m.occurred_at, l.id)),
     plans AS (
         SELECT w.serials_id, s.variants_id, 'plan'::text,
                w.place_kind || ':' || COALESCE(w.location_id::text, w.customers_id::text, '?'),
-               NULL::text, NULL::text, w.planned, w.kind, w.ref_id, w.customers_id
+               NULL::text, NULL::text, lower(w.planned), upper(w.planned), w.planned, w.kind, w.ref_id, w.customers_id,
+               NULL::int8
           FROM unit_waypoints w JOIN serials s ON s.id = w.serials_id),
-    dots AS (SELECT * FROM facts WHERE NOT isempty(during) UNION ALL SELECT * FROM plans)
-    SELECT d.serials_id, d.variants_id, d.layer, d.place, d.owner, d.state, lower(d.during), upper(d.during),
+    dots AS (SELECT * FROM facts UNION ALL SELECT * FROM plans)
+    SELECT d.serials_id, d.variants_id, d.layer, d.place, d.owner, d.state, d.starts, d.ends,
            d.why, d.ref_id, d.customers_id
       FROM dots d
-     WHERE (p_time IS NULL OR d.during && p_time)
+     WHERE (p_time IS NULL OR d.during && p_time
+            OR (isempty(d.during) AND p_time @> d.starts AND NOT coalesce(lower(p_time) = upper(p_time), false)))
        AND (p_units IS NULL OR d.serials_id = ANY (p_units))
        AND (p_models IS NULL OR d.variants_id = ANY (p_models))
        AND (p_places IS NULL OR d.place = ANY (p_places))
-       AND (p_customer IS NULL OR d.customers_id = p_customer)
-     ORDER BY d.serials_id, lower(d.during), d.layer
+       AND (p_owners IS NULL OR d.owner = ANY (p_owners))
+       AND (p_states IS NULL OR d.state = ANY (p_states))
+       AND (p_customers IS NULL OR d.customers_id = ANY (p_customers))
+       AND (p_layers IS NULL OR d.layer = ANY (p_layers))
+     ORDER BY d.serials_id, d.starts, d.layer, d.seq, d.ref_id
 $$;
-GRANT EXECUTE ON FUNCTION public.cube_dots(tsrange, int4[], int8[], text[], int4, timestamp) TO app_staff;
+GRANT EXECUTE ON FUNCTION public.cube_dots(tsrange, int4[], int8[], text[], text[], text[], int4[], text[], timestamp) TO app_staff;
 
-GRANT SELECT ON public.unit_residence, public.unit_waypoints, public.unit_trajectory, public.unit_waypoint_conflicts TO app_staff;
-GRANT EXECUTE ON FUNCTION public.whereabouts(timestamp, timestamp) TO app_staff;
+GRANT SELECT ON public.unit_residence, public.unit_waypoints, public.unit_waypoint_conflicts TO app_staff;
 ALTER TABLE public.unit_residence ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.unit_residence FORCE ROW LEVEL SECURITY;
 CREATE POLICY unit_residence_read ON public.unit_residence FOR SELECT TO app_staff USING (

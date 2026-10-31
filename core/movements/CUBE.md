@@ -21,14 +21,14 @@ order's hold, a remessa's arrival.
 Any question is a cut through the cube. The answer comes back flat, as rows, but the cut is what the
 question means:
 
-| hold fixed | you get | in the database |
+| hold fixed | you get | in PHP (CONSUMERS.md) |
 |---|---|---|
-| a moment | a slice: every entity's place then | `whereabouts(t)` |
-| a moment, and a moment of knowing | the books as they stood then: what we believed, not what we know now | `whereabouts(t, known_at)` |
-| an entity | its line, from receipt to now, then its plans | `unit_trajectory` |
-| a place and a period | occupancy: who stood there, from when to when | `unit_residence` where place and `during && [a, b)` |
-| a place, ahead | who is expected there, and when | `whereabouts(future)`, `unit_waypoints` |
-| two lines | an encounter: the same place at overlapping times | `unit_waypoint_conflicts` |
+| a moment | a slice: every entity's place then | `cube($pdo, ['at' => $t])` |
+| a moment, and a moment of knowing | the books as they stood then: what we believed, not what we know now | `cube($pdo, ['at' => $t, 'known' => $k])` |
+| an entity | its line, from receipt to now, then its plans | `cube($pdo, ['unit' => 502])` |
+| a place and a period | occupancy: who stood there, from when to when | `cube($pdo, ['place' => 'location:1', 'between' => [$a, $b]])` |
+| a place, ahead | who is expected there, and when | `cube($pdo, ['place' => 'location:2', 'between' => ['now', null], 'layer' => 'plan'])` |
+| two lines | an encounter: the same place at overlapping times | `cubeConflicts($pdo)` |
 | a plan and its fact | variance: early, late, missed | `unit_waypoints.planned` beside `.actual` |
 
 A status column is this cube cut at now and thrown away each time it is overwritten. The layer
@@ -50,14 +50,16 @@ shape, dots, so a screen or a map draws any cut the same way.
 | customer | every dot they take part in: their bikes, rentals, appointments, service | |
 | knowing | the books as they stood at a moment (the second clock) | |
 
-In SQL: `cube_dots(p_time, p_units, p_models, p_places, p_customer, p_known_at)`. In PHP, a Select like
-the other readers:
+In SQL, `cube_dots()` takes one parameter per axis. In PHP, `cube()` answers the dots, `cubeSelect()` gives
+them as a Select like the other readers, and `cubeDot()` gives one unit's dot, advanced first by an action
+when one is given. CONSUMERS.md has the shape, every axis and every angle:
 
 ```php
-positionsCube($pdo, ['at' => new DateTimeImmutable('2026-11-11 15:50')]);                  // every angle of that moment
-positionsCube($pdo, ['units' => [502]]);                                                     // every moment of that unit
-positionsCube($pdo, ['places' => ['location:1'], 'between' => [$october1, $november1]]);  // who stood at the master in October
-positionsCube($pdo, ['customer' => 7, 'at' => $saturdayNoon]);                              // where customer 7's bikes will be on Saturday
+cube($pdo, ['at' => '2026-11-11 15:50']);                                      // every angle of that moment
+cube($pdo, ['unit' => 502]);                                                   // every moment of that unit
+cube($pdo, ['place' => 'location:1', 'between' => ['2026-10-01', '2026-11-01']]);  // who stood at the master in October
+cube($pdo, ['customer' => 7, 'at' => 'saturday 12:00']);                       // where customer 7's bikes will be on Saturday
+cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);                   // the bike passed assembly: its dot now
 ```
 
 ## A map beside the territory
@@ -112,13 +114,12 @@ Small, and in the documents rather than in the layer:
 
 `sql/cube.sql`, after `sql/layer.sql`, tested on the pg_dump schema with its forced RLS (`tests/cube-test.sql`; `tests/core-test.php` runs the PHP side):
 
-- **`unit_residence`:** the stays, kept from the legs. PostgreSQL 18's temporal key (`PRIMARY KEY (serials_id, during WITHOUT OVERLAPS)`) makes "one place at a time" a database rule (it needs `btree_gist`), and GiST indexes make a slice an index probe.
+- **`unit_residence`:** the stays, kept from the legs in the same transaction: the map, which the encounters read through its GiST indexes. PostgreSQL 18's temporal key (`PRIMARY KEY (serials_id, during WITHOUT OVERLAPS)`) makes "one place at a time" a database rule (it needs `btree_gist`).
 - **Time runs forward per unit.** An event dated before the unit's last stay began is refused (MV002). A correction (`corrects_id`) may be dated back, and the stays are rebuilt from the legs.
 - **A movement's time is truncated to the second, never rounded.** A rounded stamp can fall half a second after the moment it marks, and a slice taken in between would miss the movement. The tests found this.
-- **`whereabouts(t[, known_at])`:** the slice, as known now or as the books stood then. A moment ahead gives the current stay with its waypoint.
 - **`unit_waypoints`:** the roster, read from bookings, appointments, service orders, loans and orders' holds, with the actual beside the planned where the document records it.
-- **`unit_trajectory`** and **`unit_waypoint_conflicts`**.
-- **`cube_dots()`:** the axes above.
-- **In PHP** (`positions.php`): `positionsCube()` gives the axes, and `positionsAt()` a slice. Both are Selects you can narrow, page, join and nest, like the other readers. Beside them are `unitTrajectory()` and `positionsConflicts()`.
+- **`unit_waypoint_conflicts`:** the encounters that cannot happen.
+- **`cube_dots()`:** the axes, one parameter each. It draws the facts from the legs, so the second clock comes with it, and so do the instants: two events of a unit in one second leave a stay of no length, which is on the unit's line and in a period, never at a moment.
+- **In PHP** (`cube.php`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, and `cubeConflicts()`. The Selects narrow, page, join and nest like the other readers. `positions.php` stays the cut at now that today's screens read.
 
 Counted goods have no identity and so no line. They live in the same cube by quantity: `positions` is now, `stock_at(t)` is the slice, and the road of a remessa holds what is on it.

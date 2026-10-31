@@ -4,23 +4,26 @@ This supersedes `docs/movements-core.md` (revision 1). It makes `movements-code.
 in one place, `core/movements/`, as on the server (`/var/sys/core/movements/`):
 - functions built like `core/serials.php`, loaded by one require
 - the layer of code §3.1
-- one event, `movement_dispatch`, written out in full as the pattern for the others
-- the cube: every unit's place at any moment, its line, and the roster ahead (`CUBE.md`)
+- three events written out in full as the pattern for the others: `movement_dispatch`, a document's
+  (many units and counted goods), and `movement_built` and `movement_back_to_bench`, a unit's
+- the cube: every unit's place at any moment, its line, and the roster ahead (`CUBE.md`), with one door for
+  its consumers, axes in and dots out (`CONSUMERS.md`)
 
 Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreSQL 18.6).
 
 | file | what | step |
 |---|---|---|
 | `movements.php` | the one require: `require_once '/var/sys/core/movements/movements.php';` | |
-| `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()` | C |
-| `positions.php` | the reading side: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()`; the cube's `positionsCube()` (the axes), `positionsAt()`, `unitTrajectory()`, `positionsConflicts()` | A |
-| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `movement_dispatch()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
-| `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `whereabouts(t[, known_at])`, `unit_waypoints`, `unit_trajectory`, `unit_waypoint_conflicts`, `cube_dots()` (the axes) | B |
+| `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()`, `movementBuilt()`, `movementBackToBench()` | C |
+| `positions.php` | the reading side at now: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()` | A |
+| `cube.php` | the cube's door (`CONSUMERS.md`): `cube()`, `cubeSelect()`, `cubeDot()` with its actions, `cubeConflicts()` | B |
+| `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `mv_unit_claim()`, `movement_dispatch()`, `movement_built()`, `movement_back_to_bench()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
+| `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `unit_waypoints`, `unit_waypoint_conflicts`, `cube_dots()` (one parameter per axis) | B |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
 | `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
-| `tests/dispatch-test.sql` | 11 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards | |
-| `tests/cube-test.sql` | 15 cases on the time axis: stays, slices in both clocks, the roster, conflicts, refusals, and the cube cut along each axis | |
-| `tests/core-test.php` | 19 cases through PHP | |
+| `tests/dispatch-test.sql` | 16 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards: the dispatch, the reads, the health checks, and each refusal of built and back to the bench | |
+| `tests/cube-test.sql` | 13 cases on the time axis: the stays, a cut along each axis in both clocks, an instant, the encounters, and the rules that keep one place at a time | |
+| `tests/core-test.php` | 28 cases through PHP: the door, the readers, and the cube's every angle, its dots and its actions | |
 
 Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, then `php tests/core-test.php path/to/vendor/autoload.php`.
 
@@ -52,7 +55,7 @@ The legacy statuses in use are sold 78, stock 12, assembly 4 and returned 4. No 
 As the data stands, the opening's guard (code §3.4.1) would refuse: each of its five classes has rows. They are the client's to settle (rule §0.2).
 
 ## Every event function keeps these rules
-`movement_dispatch` keeps each of them:
+`movement_dispatch`, `movement_built` and `movement_back_to_bench` keep each of them:
 
 1. It is SECURITY DEFINER, with `SET search_path = public, pg_temp`.
 2. The user comes from the session: `mv_user()` refuses an empty `app.user`.
@@ -75,7 +78,6 @@ These are the names and arguments of code §4, written on `movement_dispatch`'s 
 
 - `movementReceive($pdo, $purchaseItemId, $newReceived, $numbers)`: the line's new total, so a correction down is a lower total
 - `movementArrive($pdo, $transferId, $line, $newReceived, $units)`: per line, the new total
-- `movementBuilt` and `movementBackToBench($pdo, $serialId, $assemblyId)`: the unit must be the assembly job's (`assembly.serials_id`)
 - `movementNotSent`, `movementLost`, `movementSwap`; `movementFlip` (step D, by the master's admin)
 - `movementSell($pdo, $orderId)`, which records the cost in `sales.unit_cost`; `movementHandOver`, refused for a bike line without its unit
 - `movementUnsell`, `movementReturn`; `movementRentOut` and `movementRentBack`; `movementLoanOut` and `movementLoanBack`

@@ -226,6 +226,74 @@ BEGIN
     RETURN jsonb_build_object('legs', v_legs);
 END $$;
 
+-- A unit's claim, if it has one: an order line, a remessa draft, the rental fleet (code §3.3).
+CREATE FUNCTION public.mv_unit_claim(p_serials_id int4) RETURNS text
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    SELECT CASE
+        WHEN EXISTS (SELECT 1 FROM sales sa JOIN orders o ON o.id = sa.orders_id
+                      WHERE sa.serials_id = p_serials_id AND sa.status NOT IN ('cancelled', 'refunded') AND sa.deleted_at IS NULL
+                        AND o.status NOT IN ('cancelled', 'refunded', 'voided') AND o.deleted_at IS NULL) THEN 'order'
+        WHEN EXISTS (SELECT 1 FROM transfer_units tu JOIN transfers t ON t.id = tu.transfers_id
+                      WHERE tu.serials_id = p_serials_id AND t.status = 'draft') THEN 'draft'
+        WHEN EXISTS (SELECT 1 FROM resources r WHERE r.serials_id = p_serials_id) THEN 'fleet'
+    END
+$$;
+
+-- Events 3 and 4, built and back to the bench: the state alone changes, (L·L·validating) ⇄ (L·L·available),
+-- where the bike stands and by its assembly job. Back to the bench is refused for a claimed unit (plan §2).
+CREATE FUNCTION public.movement_assembly_state(p_serials_id int4, p_assembly_id int8, p_to text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user     int4 := mv_user();
+    v_from     text := CASE p_to WHEN 'available' THEN 'validating' ELSE 'available' END;
+    v_cell     movement_legs%ROWTYPE;
+    v_movement int8;
+    v_claim    text;
+    v_facts    jsonb := jsonb_build_object('serials_id', p_serials_id, 'assembly_id', p_assembly_id);
+BEGIN
+    PERFORM 1 FROM serials WHERE id = p_serials_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV020', 'Unidade não encontrada.', v_facts);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM assembly WHERE id = p_assembly_id AND serials_id = p_serials_id) THEN
+        PERFORM mv_refuse('MV021', 'Esta moto não é a da montagem.', v_facts);
+    END IF;
+    SELECT * INTO v_cell FROM movement_legs WHERE serials_id = p_serials_id AND qty = 1 ORDER BY id DESC LIMIT 1;
+    IF NOT FOUND OR v_cell.at_location_id IS NULL OR v_cell.at_location_id IS DISTINCT FROM v_cell.owner_location_id
+       OR v_cell.state <> v_from THEN
+        PERFORM mv_refuse('MV022', CASE p_to WHEN 'available' THEN 'A moto não está em montagem.'
+                                             ELSE 'A moto não está no estoque para voltar à bancada.' END,
+                          v_facts || jsonb_build_object('state', v_cell.state));
+    END IF;
+    IF v_cell.at_location_id <> app_location() THEN
+        PERFORM mv_refuse('MV023', 'A moto está em outra loja.', v_facts || jsonb_build_object('location_id', v_cell.at_location_id));
+    END IF;
+    IF p_to = 'validating' THEN
+        v_claim := mv_unit_claim(p_serials_id);
+        IF v_claim IS NOT NULL THEN
+            PERFORM mv_refuse('MV024', 'A moto está reservada e não volta à bancada.', v_facts || jsonb_build_object('claim', v_claim));
+        END IF;
+    END IF;
+
+    INSERT INTO movements (kind, users_id, ref_type, ref_id)
+    VALUES (CASE p_to WHEN 'available' THEN 'built' ELSE 'back_to_bench' END, v_user, 'assembly', p_assembly_id)
+    RETURNING id INTO v_movement;
+    INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, owner_location_id, state)
+    VALUES (v_movement, v_cell.variants_id, p_serials_id, -1, v_cell.at_location_id, v_cell.owner_location_id, v_from),
+           (v_movement, v_cell.variants_id, p_serials_id,  1, v_cell.at_location_id, v_cell.owner_location_id, p_to);
+    RETURN jsonb_build_object('state', p_to);
+END $$;
+
+CREATE FUNCTION public.movement_built(p_serials_id int4, p_assembly_id int8) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT movement_assembly_state(p_serials_id, p_assembly_id, 'available')
+$$;
+
+CREATE FUNCTION public.movement_back_to_bench(p_serials_id int4, p_assembly_id int8) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT movement_assembly_state(p_serials_id, p_assembly_id, 'validating')
+$$;
+
 -- The unit's position on the layer (the step-C definition; step A defines the same columns on today's tables).
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
@@ -416,7 +484,8 @@ GRANT SELECT ON public.movements, public.movement_legs, public.positions, public
       public.stock_on_hand, public.stock_sellable, public.owned_elsewhere, public.road_by_transfer, public.stock_total,
       public.movement_check_balance, public.movement_check_chain, public.movement_check_positions,
       public.movement_check_serial_mix, public.movement_check_roads TO app_staff;
-REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_units(),
+       public.movement_assembly_state(int4, int8, text), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
-GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8) TO app_staff;
+GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8) TO app_staff;

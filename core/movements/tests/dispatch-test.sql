@@ -11,8 +11,8 @@ SELECT set_config('app.location', '1', false), set_config('app.user', '1', false
 -- the fixture's plain rows go in with today's triggers paused (the serial_events trigger and the document
 -- guards keep a session to its own location); the layer's own trigger runs for every leg below
 SET session_replication_role = replica;
-TRUNCATE movement_legs, movements, positions, transfer_units, transfer_items, transfers, sales, orders, serials,
-         variants, items, users, locations RESTART IDENTITY CASCADE;
+TRUNCATE movement_legs, movements, positions, transfer_units, transfer_items, transfers, sales, orders, assembly,
+         serials, variants, items, users, locations RESTART IDENTITY CASCADE;
 INSERT INTO locations (id, code, name, kind) OVERRIDING SYSTEM VALUE VALUES (1, 'MTZ', 'Matriz', 'master'), (2, 'PRU', 'Prudente', 'shop');
 INSERT INTO users (id, name, login, email, password_hash, location_id, role) OVERRIDING SYSTEM VALUE
 VALUES (1, 'Johan', 'johan', 'j@example.com', 'x', 1, 'superadmin');
@@ -20,7 +20,10 @@ INSERT INTO items (id, name, serial, sellable) OVERRIDING SYSTEM VALUE VALUES (1
 INSERT INTO variants (id, items_id, sku) OVERRIDING SYSTEM VALUE VALUES (100, 10, 'MX-VERDE'), (200, 20, 'CAP-M');
 INSERT INTO serials (id, variants_id, serial_number, status, location_id) OVERRIDING SYSTEM VALUE
 VALUES (500, 100, '9C2KC1650PR000001', 'stock', 1), (501, 100, '9C2KC1650PR000002', 'stock', 1),
-       (502, 100, '9C2KC1650PR000003', 'stock', 1), (503, 100, '9C2KC1650PR000004', 'stock', 1);
+       (502, 100, '9C2KC1650PR000003', 'stock', 1), (503, 100, '9C2KC1650PR000004', 'stock', 1),
+       (504, 100, '9C2KC1650PR000005', 'assembly', 1);
+INSERT INTO assembly (id, variants_id, serials_id, stage, location_id) OVERRIDING SYSTEM VALUE
+VALUES (81, 100, 504, 'in_process', 1), (82, 100, 501, 'delivered', 1);
 INSERT INTO transfers (id, shop_purchases_id, status, location_id, to_location_id) OVERRIDING SYSTEM VALUE
 VALUES (55, 1, 'draft', 1, 2), (56, 2, 'sent', 1, 2);
 INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty)
@@ -33,7 +36,7 @@ VALUES (900, 10, 100, 'MX-VERDE', 'moto', 'Moto X', 1, 1000, 1000, 1000, 501, 1)
        (901, 10, 100, 'MX-VERDE', 'moto', 'Moto X', 1, 1000, 1000, 1000, NULL, 1);   -- a paid line waiting for its unit
 SET session_replication_role = origin;
 
--- the opening, on 1 Oct: four bikes and five helmets at the master, from the books
+-- the opening, on 1 Oct: four bikes and five helmets at the master, and bike 504 on the bench, from the books
 WITH m AS (INSERT INTO movements (kind, occurred_at) VALUES ('opening', '2026-10-01 09:00') RETURNING id)
 INSERT INTO movement_legs (movements_id, variants_id, serials_id, qty, at_location_id, owner_location_id, state)
 SELECT m.id, x.* FROM m, (VALUES
@@ -41,6 +44,7 @@ SELECT m.id, x.* FROM m, (VALUES
     (100, 501, -1, NULL, NULL, 'available'), (100, 501, 1, 1, 1, 'available'),
     (100, 502, -1, NULL, NULL, 'available'), (100, 502, 1, 1, 1, 'available'),
     (100, 503, -1, NULL, NULL, 'available'), (100, 503, 1, 1, 1, 'available'),
+    (100, 504, -1, NULL, NULL, 'validating'), (100, 504, 1, 1, 1, 'validating'),
     (200, NULL, -5, NULL, NULL, 'available'), (200, NULL, 5, 1, 1, 'available')) x;
 
 \echo '== 1. a shop seat dispatches. Expect MV010.'
@@ -73,6 +77,18 @@ SELECT (SELECT count(*) FROM movement_check_balance) AS balance, (SELECT count(*
        (SELECT count(*) FROM movement_check_roads) AS roads;
 \echo '== 10. a leg edited by hand. Expect refused.'
 UPDATE movement_legs SET qty = 2 WHERE id = 1;
-\echo '== 11. an empty app.user. Expect MV001.'
+\echo '== 11. an unknown unit is built. Expect MV020.'
+SELECT movement_built(999999, 81);
+\echo '== 12. bike 500 built by the job of bike 504. Expect MV021.'
+SELECT movement_built(500, 81);
+\echo '== 13. bike 504 back to the bench while it is on it. Expect MV022.'
+SELECT movement_back_to_bench(504, 81);
+\echo '== 14. bike 504 built from Prudente''s seat. Expect MV023.'
+SELECT set_config('app.location', '2', false) \g /dev/null
+SELECT movement_built(504, 81);
+SELECT set_config('app.location', '1', false) \g /dev/null
+\echo '== 15. bike 501 back to the bench: order 900 holds it. Expect MV024.'
+SELECT movement_back_to_bench(501, 82);
+\echo '== 16. an empty app.user. Expect MV001.'
 SELECT set_config('app.user', '', false) \g /dev/null
 SELECT movement_dispatch(56);

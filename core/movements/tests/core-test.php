@@ -57,7 +57,7 @@ check('the unit is on the remessa\'s road, still the sender\'s', $unit['place_ki
 check('an unknown unit has no position', unitPosition($pdo, 999999) === null);
 $progress = transferProgress($pdo, $transferId);
 check('the road carries one bike and one helmet', array_map(fn ($r) => [(int) $r['variants_id'], (int) $r['qty']], $progress) === [[100, 1], [200, 1]], $progress);
-check('the organisation still owns every bike and helmet', stockTotal($pdo) == [100 => 4, 200 => 5], stockTotal($pdo));
+check('the organisation still owns every bike and helmet', stockTotal($pdo) == [100 => 5, 200 => 5], stockTotal($pdo));
 
 // a list screen: narrowed, paged, counted
 $onRoad = positionsUnits($pdo)->where('up.place_kind = ', 'road');
@@ -73,22 +73,59 @@ $select->where('v.id IN ', positionsSellable($pdo, $select)
 $sellable = $select->orderBy('v.id')->fetchAll();
 check('the catalogue nests the sellable models', array_column($sellable, 'sku') === ['CAP-M'], $sellable);
 
-// the cube (after tests/cube-test.sql): a slice then and now, a unit's line, the encounters that cannot happen
-$then = positionsAt($pdo, new DateTimeImmutable('2026-10-15'))->where('wa.serials_id = ', 503)->fetchOne();
-$now = positionsAt($pdo, new DateTimeImmutable())->where('wa.serials_id = ', 503)->fetchOne();
-check('bike 503 stood at the master on 15 Oct, and is on its road now', $then['place_kind'] === 'location' && $now['place_kind'] === 'road', [$then['place_kind'], $now['place_kind']]);
-$asKnown = positionsAt($pdo, new DateTimeImmutable('2026-10-15'), new DateTimeImmutable('2026-10-15'));
-check('as the books stood on 15 Oct, they knew no unit yet', positionsCount($pdo, $asKnown) === 0);
-$line = unitTrajectory($pdo, 502);
-check('bike 502\'s line: one stay, then a rental and a service planned', array_column($line, 'how') === ['opening', 'rental', 'service'], array_column($line, 'how'));
-check('two encounters cannot happen', positionsCount($pdo, positionsConflicts($pdo)) === 2, positionsConflicts($pdo)->fetchAll());
+// the cube (cube.php, after tests/cube-test.sql): any angle in, dots out
+$moment = cubeSelect($pdo, ['at' => 'now', 'layer' => 'fact']);
+check('a moment: every unit somewhere', positionsCount($pdo, $moment) === 5, $moment->fetchAll());
+$then = cubeDot($pdo, ['unit' => 503, 'at' => '2026-10-15']);
+$now = cubeDot($pdo, ['unit' => 503]);
+check('bike 503 stood at the master on 15 Oct, and is on its road now', $then['place'] === 'location:1' && $now['place'] === "road:{$transferId}", [$then['place'], $now['place']]);
+check('as the books stood on 15 Oct, they knew no unit yet', cube($pdo, ['at' => '2026-10-15', 'known' => '2026-10-15']) === []);
+$life = cube($pdo, ['unit' => 502]);
+check('a unit: its line, one stay, then a rental and a service planned', array_column($life, 'why') === ['opening', 'rental', 'service'], array_column($life, 'why'));
+$week = cube($pdo, ['customer' => 7, 'at' => (new DateTimeImmutable('today'))->modify('+7 days 12 hours')]);
+check('a customer at a moment next week: bike 502 with them', array_column($week, 'unit') === [502] && $week[0]['place'] === 'customer:7', $week);
+$road = cube($pdo, ['place' => 'road:55', 'between' => ['2026-10-01', null]]);
+check('a place over a period: bike 500 on road 55', array_column($road, 'unit') === [500], $road);
+$bench = cube($pdo, ['at' => 'now', 'state' => 'validating', 'owner' => 'location:1']);
+check('a state and an owner: what the master has on the bench', array_column($bench, 'unit') === [504], $bench);
+$perPlace = cubeSelect($pdo, ['at' => 'now', 'model' => 100, 'layer' => 'fact'])->resetColumns()
+    ->columns('c.place', 'COUNT(*)')->groupBy('c.place')->orderBy('c.place')->fetchKeyPair();
+check('a model widened, grouped like any Select: its units per place', $perPlace == ['location:1' => 3, "road:{$transferId}" => 1, 'road:55' => 1], $perPlace);
+check('two encounters cannot happen', positionsCount($pdo, cubeConflicts($pdo)) === 2, cubeConflicts($pdo)->fetchAll());
+$wrong = [];
+foreach ([['units' => [502]], ['at' => 'now', 'between' => ['2026-10-01', null]], ['place' => 'shop 2']] as $axes) {
+    try {
+        cube($pdo, $axes);
+    } catch (InvalidArgumentException $e) {
+        $wrong[] = $e->getMessage();
+    }
+}
+check('a misspelt axis, two times, a place that is no coordinate: each refused, none answers the whole cube', count($wrong) === 3, $wrong);
 
-// the axes: one value on one axis, every angle of the rest; narrowed or widened by adding axes
-$moment = positionsCube($pdo, ['at' => new DateTimeImmutable()])->where('c.layer = ', 'fact');
-check('a moment: every unit somewhere', positionsCount($pdo, $moment) === 4, $moment->fetchAll());
-$life = positionsCube($pdo, ['units' => [502]])->fetchAll();
-check('a unit: every slice of its life', array_column($life, 'why') === ['opening', 'rental', 'service'], array_column($life, 'why'));
-$week = positionsCube($pdo, ['customer' => 7, 'at' => (new DateTimeImmutable('today'))->modify('+7 days 12 hours')])->fetchAll();
-check('a customer at a moment next week: bike 502 with them', array_column($week, 'serials_id') === [502] && $week[0]['place'] === 'customer:7', $week);
-$road = positionsCube($pdo, ['places' => ['road:55'], 'between' => [new DateTimeImmutable('2026-10-01'), null]])->fetchAll();
-check('a place over a period: bike 500 on road 55', array_column($road, 'serials_id') === [500], $road);
+// one dot, and the dot advanced by an action
+$dot = cubeDot($pdo, ['unit' => 504]);
+check('a single dot: bike 504 on the bench at the master', $dot['state'] === 'validating' && $dot['place'] === 'location:1', $dot);
+$dot = cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);
+check('advanced by built: the dot it is in now', $dot['state'] === 'available' && $dot['why'] === 'built', $dot);
+try {
+    cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);
+    check('built twice is refused', false);
+} catch (MovementRefused $e) {
+    check('built twice is refused, coded, with its facts', $e->sqlState === 'MV022' && $e->facts['state'] === 'available', [$e->sqlState, $e->getMessage()]);
+}
+$dot = cubeDot($pdo, ['unit' => 504], 'back_to_bench', ['assembly' => 81]);
+check('advanced by back_to_bench: validating again', $dot['state'] === 'validating' && $dot['why'] === 'back_to_bench', $dot);
+$wrong = [];
+foreach ([[['unit' => 504], 'paint', []], [['unit' => 504], 'built', []], [['unit' => 504, 'at' => '2026-10-15'], 'built', ['assembly' => 81]]] as [$axes, $action, $with]) {
+    try {
+        cubeDot($pdo, $axes, $action, $with);
+    } catch (InvalidArgumentException $e) {
+        $wrong[] = $e->getMessage();
+    }
+}
+check('an unknown action, an action without what it needs, an action dated back: each told apart', count($wrong) === 3, $wrong);
+$line = cube($pdo, ['unit' => 504, 'layer' => 'fact']);
+check('its line: the opening, built, back to the bench', array_column($line, 'why') === ['opening', 'built', 'back_to_bench'], array_column($line, 'why'));
+$since = $line[1]['starts'];
+check('from the build on: both events in the period, one cell at the moment', count(cube($pdo, ['unit' => 504, 'between' => [$since, null]])) === 2
+    && count(cube($pdo, ['unit' => 504, 'at' => $since])) === 1);
