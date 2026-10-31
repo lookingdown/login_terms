@@ -76,6 +76,8 @@ function cubeActions(): array
                                 isset($with['supplier']) ? (int) $with['supplier'] : null, $with['note'] ?? null)],
         'flipped'       => [['to'], fn (PDO $pdo, int $unit, array $with) => movementFlip($pdo,
                                 (int) (unitPosition($pdo, $unit)['location_id'] ?? 0), (int) $with['to'], [$unit], [], $with['note'] ?? null)],
+        'corrected'     => [['approval', 'place', 'note'], fn (PDO $pdo, int $unit, array $with) => movementCorrect($pdo, $unit, (int) $with['approval'],
+                                array_intersect_key($with, ['place' => 0, 'owner' => 0, 'state' => 0]), (string) $with['note'])],
     ];
 }
 

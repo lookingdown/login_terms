@@ -369,3 +369,38 @@ function movementCountClose(PDO $pdo, int $countId): array
     return movementCall($pdo, 'movement_count_close', [[$countId, 'bigint']]);
 }
 
+/**
+ * Event 24, corrected (the supervisor, on the unit's page): the unit put in the cell it really is in. $cell speaks the
+ * cube's coordinates: ['place' => 'location:2'], with 'owner' (the place's when left out) and 'state' (validating or
+ * available; the unit's own when left out). The supervisor's word is $approvalId, an approval unit_correction for this
+ * unit, used once; $note says why. Never a sale, never a write-off; a claimed unit only to where its holder stands.
+ *
+ * @return array{movement_id: int}
+ */
+function movementCorrect(PDO $pdo, int $serialId, int $approvalId, array $cell, string $note): array
+{
+    $location = function (string $axis) use ($cell): ?int {
+        if (!isset($cell[$axis])) {
+            return null;
+        }
+        if (!preg_match('/^location:(\d+)$/', (string) $cell[$axis], $m)) {
+            throw new InvalidArgumentException("A correction puts a unit at a location: {$axis} is location:<id>, not {$cell[$axis]}.");
+        }
+        return (int) $m[1];
+    };
+    return movementCall($pdo, 'movement_correct', [[$serialId, 'integer'], [$approvalId, 'bigint'], [$location('place'), 'integer'],
+                                                   [$location('owner'), 'integer'], [$cell['state'] ?? null, 'text'], [$note, 'text']]);
+}
+
+/**
+ * Removing a unit that is nothing yet (deleteSerial): its receipt corrected down by this unit, with the supervisor's
+ * approval unit_removal for it. Only a unit whose one movement is its receipt and that no document names. Its
+ * number is freed; the answer gives it back, for the approval's record.
+ *
+ * @return array{removed: bool, purchase_items_id: int, serial_number: ?string}
+ */
+function movementUnitRemove(PDO $pdo, int $serialId, int $approvalId, ?string $note = null): array
+{
+    return movementCall($pdo, 'movement_unit_remove', [[$serialId, 'integer'], [$approvalId, 'bigint'], [$note, 'text']]);
+}
+

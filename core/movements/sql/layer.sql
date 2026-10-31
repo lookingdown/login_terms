@@ -1532,6 +1532,143 @@ BEGIN
     RETURN mv_adjust('counted', 'stock_counts', p_counts_id, v_lines, 'count', NULL);
 END $$;
 
+-- Event 24, corrected (the supervisor, on the unit's page; it replaces the status set by hand and unstick.php): the
+-- unit's cell → the cell it really is in, a location's, validating or available, with a note (MV156). The supervisor's
+-- word is an approval for this unit (action unit_correction: MV150), each used once (MV151). Never a sale: a customer's
+-- unit is undone or returned on its order (MV152); a write-off is its own event (MV154). From the master's seat, or
+-- from the seat of the unit's place, its owner or the place it goes to (MV093). A unit something holds goes only
+-- where its holder stands, available, so the claim stays whole (MV055). The owner is the place's unless given, the
+-- state the unit's own unless given.
+CREATE FUNCTION public.movement_correct(p_serials_id int4, p_approval_id int8, p_place int4, p_owner int4 DEFAULT NULL,
+                                        p_state text DEFAULT NULL, p_note text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user     int4 := mv_user();   -- an empty session is refused before anything else
+    v_cell     movement_legs%ROWTYPE;
+    v_owner    int4 := COALESCE(p_owner, p_place);
+    v_state    text;
+    v_to       jsonb;
+    v_movement int8;
+    v_facts    jsonb := jsonb_build_object('serials_id', p_serials_id, 'approvals_id', p_approval_id);
+BEGIN
+    IF NULLIF(trim(p_note), '') IS NULL THEN
+        PERFORM mv_refuse('MV156', 'A correction needs its note.', v_facts);
+    END IF;
+    PERFORM 1 FROM serials WHERE id = p_serials_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV020', 'Unit not found.', v_facts);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM approvals WHERE id = p_approval_id AND action = 'unit_correction'
+                      AND ref_type = 'serials' AND ref_id = p_serials_id) THEN
+        PERFORM mv_refuse('MV150', 'A correction needs the supervisor''s approval for this unit (unit_correction).', v_facts);
+    END IF;
+    IF EXISTS (SELECT 1 FROM movements WHERE ref_type = 'approvals' AND ref_id = p_approval_id) THEN
+        PERFORM mv_refuse('MV151', 'The approval was used already.', v_facts);
+    END IF;
+    v_cell := mv_unit_leg(p_serials_id);
+    IF v_cell.id IS NULL THEN
+        PERFORM mv_refuse('MV157', 'The unit has no line yet: the opening gives it one.', v_facts);
+    END IF;
+    IF v_cell.owner_customer_id IS NOT NULL THEN
+        PERFORM mv_refuse('MV152', 'The unit is a customer''s: a sale is undone or returned on its order.', v_facts);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM locations WHERE id = p_place AND active)
+       OR NOT EXISTS (SELECT 1 FROM locations WHERE id = v_owner AND active) THEN
+        PERFORM mv_refuse('MV153', 'A correction puts the unit at an active location, an active location''s.',
+                          v_facts || jsonb_build_object('place', p_place, 'owner', v_owner));
+    END IF;
+    v_state := COALESCE(p_state, v_cell.state);
+    IF v_state NOT IN ('validating', 'available') THEN
+        PERFORM mv_refuse('MV154', 'A correction leaves the unit validating or available: a write-off is its own event.',
+                          v_facts || jsonb_build_object('state', v_state));
+    END IF;
+    IF NOT (app_at_master() OR app_location() IS NOT DISTINCT FROM v_cell.at_location_id
+            OR app_location() IS NOT DISTINCT FROM v_cell.owner_location_id OR app_location() = p_place) THEN
+        PERFORM mv_refuse('MV093', 'The document is another location''s.', v_facts || jsonb_build_object('location_id', v_cell.at_location_id));
+    END IF;
+    v_to := mv_cell(NULL::movement_legs) || jsonb_build_object('at_location_id', p_place, 'owner_location_id', v_owner, 'state', v_state);
+    IF mv_cell(v_cell) = v_to THEN
+        PERFORM mv_refuse('MV155', 'The unit is there already.', v_facts);
+    END IF;
+    IF EXISTS (SELECT 1 FROM unit_claims c
+                 LEFT JOIN orders o ON c.kind = 'order' AND o.id = c.ref_id
+                 LEFT JOIN transfers t ON c.kind = 'draft' AND t.id = c.ref_id
+                 LEFT JOIN resources r ON c.kind = 'fleet' AND r.id = c.ref_id
+                WHERE c.serials_id = p_serials_id
+                  AND (COALESCE(o.location_id, t.location_id, r.location_id) IS DISTINCT FROM p_place
+                       OR v_owner <> p_place OR v_state <> 'available')) THEN
+        PERFORM mv_refuse('MV055', 'The unit is held by something else.', v_facts || jsonb_build_object('claim', mv_unit_claim(p_serials_id)));
+    END IF;
+    v_movement := mv_post('corrected', 'approvals', p_approval_id, mv_pair(v_cell.variants_id, p_serials_id, 1, mv_cell(v_cell), v_to),
+                          trim(p_note));
+    RETURN jsonb_build_object('movement_id', v_movement);
+END $$;
+
+-- Removing a unit that is nothing yet (deleteSerial, the supervisor's): its receipt corrected down by this very unit,
+-- numbered or not, back to where the receipt brought it from. Only a unit whose one movement is its receipt (MV161),
+-- named by no document (MV162): an order line, an assembly job, a service order, a workshop appointment, a loan, a
+-- remessa draft, the rental fleet, a stock count, an issued NF-e. The supervisor's word is an approval for this unit
+-- (action unit_removal: MV160); from the master's seat or the receipt's (MV093). The line's received total goes down
+-- by one, and the unit's number is freed for the bike that really has it. The identity row stays, its line ending
+-- where it began: a unit is never deleted once the journal names it.
+CREATE FUNCTION public.movement_unit_remove(p_serials_id int4, p_approval_id int8, p_note text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_user  int4 := mv_user();   -- an empty session is refused before anything else
+    v_unit  serials%ROWTYPE;
+    v_cell  movement_legs%ROWTYPE;
+    v_entry movements%ROWTYPE;
+    v_where int4;
+    v_named text;
+    v_facts jsonb := jsonb_build_object('serials_id', p_serials_id, 'approvals_id', p_approval_id);
+BEGIN
+    SELECT * INTO v_unit FROM serials WHERE id = p_serials_id FOR UPDATE;
+    IF NOT FOUND THEN
+        PERFORM mv_refuse('MV020', 'Unit not found.', v_facts);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM approvals WHERE id = p_approval_id AND action = 'unit_removal'
+                      AND ref_type = 'serials' AND ref_id = p_serials_id) THEN
+        PERFORM mv_refuse('MV160', 'Removing a unit needs the supervisor''s approval for it (unit_removal).', v_facts);
+    END IF;
+    v_cell := mv_unit_leg(p_serials_id);
+    SELECT * INTO v_entry FROM movements WHERE id = v_cell.movements_id;
+    IF v_cell.id IS NULL OR v_entry.kind <> 'received'
+       OR (SELECT count(*) FROM movement_legs WHERE serials_id = p_serials_id) <> 2 THEN
+        PERFORM mv_refuse('MV161', 'Only a unit whose one movement is its receipt is removed.', v_facts || jsonb_build_object('last', v_entry.kind));
+    END IF;
+    SELECT p.location_id INTO v_where
+      FROM purchase_items pi JOIN purchases p ON p.id = pi.purchases_id
+     WHERE pi.id = v_entry.ref_id
+       FOR UPDATE OF pi;
+    IF NOT (app_at_master() OR app_location() IS NOT DISTINCT FROM v_where) THEN
+        PERFORM mv_refuse('MV093', 'The document is another location''s.', v_facts || jsonb_build_object('location_id', v_where));
+    END IF;
+    v_named := CASE
+        WHEN EXISTS (SELECT 1 FROM sales WHERE serials_id = p_serials_id) THEN 'order'
+        WHEN EXISTS (SELECT 1 FROM assembly WHERE serials_id = p_serials_id) THEN 'assembly'
+        WHEN EXISTS (SELECT 1 FROM service_orders WHERE serials_id = p_serials_id) THEN 'service_order'
+        WHEN EXISTS (SELECT 1 FROM workshop_appointments WHERE serials_id = p_serials_id) THEN 'appointment'
+        WHEN EXISTS (SELECT 1 FROM loans WHERE serials_id = p_serials_id) THEN 'loan'
+        WHEN EXISTS (SELECT 1 FROM transfer_units WHERE serials_id = p_serials_id) THEN 'draft'
+        WHEN EXISTS (SELECT 1 FROM resources WHERE serials_id = p_serials_id) THEN 'fleet'
+        WHEN EXISTS (SELECT 1 FROM stock_count_lines WHERE serials_id = p_serials_id) THEN 'count'
+        WHEN v_unit.serial_number IS NOT NULL
+             AND EXISTS (SELECT 1 FROM nfe_document_items WHERE serial_number = v_unit.serial_number) THEN 'nfe' END;
+    IF v_named IS NOT NULL THEN
+        PERFORM mv_refuse('MV162', 'The unit is named by a document: correct that first.', v_facts || jsonb_build_object('named', v_named));
+    END IF;
+    PERFORM mv_post('receipt_corrected', 'purchase_items', v_entry.ref_id,
+                    mv_pair(v_cell.variants_id, p_serials_id, 1, mv_cell(v_cell),
+                            (SELECT mv_cell(l) FROM movement_legs l
+                              WHERE l.movements_id = v_entry.id AND l.serials_id = p_serials_id AND l.qty = -1)),
+                    NULLIF(trim(p_note), ''));
+    UPDATE purchase_items SET qty_received = qty_received - 1 WHERE id = v_entry.ref_id;
+    IF v_unit.serial_number IS NOT NULL THEN
+        UPDATE serials SET serial_number = NULL WHERE id = p_serials_id;
+    END IF;
+    RETURN jsonb_build_object('removed', true, 'purchase_items_id', v_entry.ref_id, 'serial_number', v_unit.serial_number);
+END $$;
+
 -- The unit's position on the layer: where, whose, its state and since when.
 CREATE VIEW public.unit_positions WITH (security_invoker = true) AS
 SELECT DISTINCT ON (l.serials_id)
@@ -1736,7 +1873,8 @@ REVOKE EXECUTE ON FUNCTION public.movement_dispatch(int8), public.mv_portal_unit
        public.app_user_admin(), public.mv_lend(boolean, text, text, text, int8, int4, int4, int4, int8),
        public.mv_rental(int8, boolean), public.mv_loan(int8, boolean), public.movement_rent_out(int8), public.movement_rent_back(int8),
        public.movement_loan_out(int8), public.movement_loan_back(int8), public.mv_adjust(text, text, int8, jsonb, text, text),
-       public.movement_adjust(jsonb, text, text), public.movement_count_close(int8) FROM PUBLIC;
+       public.movement_adjust(jsonb, text, text), public.movement_count_close(int8),
+       public.movement_correct(int4, int8, int4, int4, text, text), public.movement_unit_remove(int4, int8, text) FROM PUBLIC;
 GRANT SELECT ON public.movements, public.movement_legs TO app_portal;
 GRANT EXECUTE ON FUNCTION public.mv_portal_units() TO app_portal;
 GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(int4, int8), public.movement_back_to_bench(int4, int8),
@@ -1748,4 +1886,5 @@ GRANT EXECUTE ON FUNCTION public.movement_dispatch(int8), public.movement_built(
       public.movement_write_off(int4, int8, text), public.movement_to_provider(int4, int8, int8, text),
       public.app_user_admin(), public.movement_flip(int4, int4, jsonb, jsonb, text), public.movement_rent_out(int8),
       public.movement_rent_back(int8), public.movement_loan_out(int8), public.movement_loan_back(int8),
-      public.movement_adjust(jsonb, text, text), public.movement_count_close(int8) TO app_staff;
+      public.movement_adjust(jsonb, text, text), public.movement_count_close(int8),
+      public.movement_correct(int4, int8, int4, int4, text, text), public.movement_unit_remove(int4, int8, text) TO app_staff;

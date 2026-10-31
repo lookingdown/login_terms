@@ -140,13 +140,13 @@ cubeDot($pdo, ['unit' => 504], 'built', ['assembly' => 81]);    // advanced: the
 | `written_off` | `approval`, `note` | MV082 not the master; MV081 not in stock or on the bench where its owner stands; MV055 something holds it; MV080 no baixa_moto approval for this unit |
 | `to_provider` | `approval`; `supplier`, `note` | as `written_off`; MV083 no supplier named and none it was bought from |
 | `flipped` | `to` (a location id); `note` | MV130 not the master's admin or superadmin; MV131 not from one active location to another (a unit that stands at none has none to go from); MV020 the unit is unknown; MV091 it is not available where its owner stands; MV055 something holds it |
+| `corrected` | `approval`, `place`, `note`; `owner`, `state` | the supervisor's correction, event 24: `place` and `owner` are coordinates (`location:2`), the owner the place's and the state the unit's own when left out. MV156 no note; MV150 no approval `unit_correction` for this unit; MV151 the approval used already; MV157 the unit has no line; MV152 it is a customer's (a sale is undone or returned on its order); MV153 not an active location; MV154 `written_off` asked for (a write-off is its own action); MV093 not the master's seat, nor the seat of where it stands, whose it is or where it goes; MV155 it is there already; MV055 something holds it and it would leave its holder |
 
 The actions to come, each on the same pattern (plan §2, code §4). The needs are a proposal:
 
 | action | event | needs | step |
 |---|---|---|---|
 | `workshop_in`, `workshop_out` | 18, 19 | `service_order` | F |
-| `corrected` | 24 | `place`, `owner`, `state`, `note` | |
 
 Adding one takes three pieces: its database function on `movement_dispatch`'s pattern, its function in
 `ledger.php`, and one line in `cubeActions()`. The consumer's call does not change.
@@ -157,6 +157,8 @@ counted goods, at once. A rental and a loan move one dot, but their document nam
 the screen holds the booking or the loan, not the bike. They stay on their document's function
 (`movementDispatch()`, `movementRentOut()` and code §4's others), and the dots they leave read like any other:
 a bike out on a rental or a loan stands at `customer:<id>`, its location's still, its word `rented` or `loaned`.
+Removing a unit that is nothing yet, `movementUnitRemove()`, is its receipt's correction: it takes back the one
+movement that brought it in, so it stays with its receipt's line. After it the unit's word is `removed`.
 
 ## What a dot is not, yet
 

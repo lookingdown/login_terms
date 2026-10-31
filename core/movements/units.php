@@ -32,6 +32,9 @@ function unitWord(?array $position, ?array $claim = null, ?array $bench = null, 
     if ($position['state'] === 'written_off') {
         return 'written_off';
     }
+    if ($position['why'] === 'receipt_corrected') {
+        return 'removed';                       // taken back from its receipt: it never was
+    }
     if ($service !== null) {
         return 'workshop';
     }

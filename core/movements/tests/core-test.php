@@ -268,3 +268,37 @@ check('a count closed: the master\'s helmets set to the 3 counted, 1 → 3', $cl
 $pdo->rollBack();
 check('undone: bike 502 in the fleet at the master, and two helmets', $word(502) === 'fleet'
     && (int) $pdo->query('SELECT qty FROM stock_on_hand WHERE location_id = 1 AND variants_id = 200')->fetchColumn() === 2);
+
+// the supervisor's correction by its dot action, and a unit that is nothing yet removed (ledger.php), undone after
+$pdo->beginTransaction();
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$pdo->exec("INSERT INTO approvals (id, action, ref_type, ref_id, requested_by, approved_by, approved_via, reason, location_id) OVERRIDING SYSTEM VALUE
+            VALUES (91, 'unit_correction', 'serials', 503, 1, 1, 'override', 'arrived unrecorded', 1)");
+$pdo->exec("SET LOCAL session_replication_role = origin");
+$dot = cubeDot($pdo, ['unit' => 503], 'corrected', ['approval' => 91, 'place' => 'location:2', 'note' => 'it is at Prudente']);
+check('a dot corrected by the supervisor: off its road, at Prudente and Prudente\'s', $dot['place'] === 'location:2' && $dot['owner'] === 'location:2'
+    && $dot['state'] === 'available' && $dot['why'] === 'corrected', $dot);
+try {
+    movementCorrect($pdo, 503, 91, ['place' => 'road:55'], 'onto a road');
+    check('a correction onto a road is refused', false);
+} catch (InvalidArgumentException $e) {
+    check('a correction onto a road is refused before anything is sent', true, $e->getMessage());
+}
+$got = movementReceive($pdo, 301, 1, ['9C2KC1650PR000077']);
+$unit = $got['units'][0];
+$pdo->exec("SET LOCAL session_replication_role = replica");
+$pdo->exec("INSERT INTO approvals (id, action, ref_type, ref_id, requested_by, approved_by, approved_via, reason, location_id) OVERRIDING SYSTEM VALUE
+            VALUES (92, 'unit_removal', 'serials', {$unit}, 1, 1, 'override', 'counted twice', 1)");
+$pdo->exec("SET LOCAL session_replication_role = origin");
+$removed = movementUnitRemove($pdo, $unit, 92, 'counted twice');
+$row = unitRows($pdo, [$unit])[0];
+check('a unit that is nothing yet removed: its number given back and freed, its word removed', $removed['removed'] === true
+    && $removed['serial_number'] === '9C2KC1650PR000077' && $row['serial_number'] === null && $row['word'] === 'removed', [$removed, $row['word']]);
+try {
+    movementUnitRemove($pdo, 504, 92);
+    check('a unit on the bench is not removed', false);
+} catch (MovementRefused $e) {
+    check('a unit with an approval for another is refused first', $e->sqlState === 'MV160', $e->sqlState);
+}
+$pdo->rollBack();
+check('undone: bike 503 on its road again', cubeDot($pdo, ['unit' => 503])['place'] === "road:{$transferId}");

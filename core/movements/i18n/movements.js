@@ -13,8 +13,9 @@
  *
  * A key is a prefix and an English word: unitWord_<word>, mvKind_<kind>, planKind_<kind>, unitState_<state>,
  * claim_<kind>, servicePhase_<phase>, trail_<step>, trailSub_<key>, story_<kind>, condition_<state>,
- * place_<kind>, refType_<type>, conflict_<key>, mvRefused_<code>, reason_<key> (a movement's reason: who bears a
- * loss here; an adjustment's found, damaged, loss, expired, count and other are the house's, in messages.js).
+ * place_<kind>, refType_<type>, conflict_<key>, named_<document>, mvRefused_<code>, reason_<key> (a movement's
+ * reason: who bears a loss here; an adjustment's found, damaged, loss, expired, count and other are the house's,
+ * in messages.js).
  * A new locale is a third block with the same keys.
  */
 
@@ -37,6 +38,7 @@ export const movementMessages = {
     unitWord_provider: 'Returned to the supplier',
     unitWord_workshop: 'In the workshop',
     unitWord_written_off: 'Written off',
+    unitWord_removed: 'Removed',
     unitWord_unknown: '—',
 
     servicePhase_received: 'Received in the workshop',
@@ -222,6 +224,26 @@ export const movementMessages = {
     mvRefused_MV146: 'A bike out with someone is with a customer: pick the customer first.',
     reason_origin: 'Borne by the origin',
     reason_carrier: 'Borne by the carrier',
+    mvRefused_MV150: 'A correction needs the supervisor’s approval for this bike.',
+    mvRefused_MV151: 'This approval was used already.',
+    mvRefused_MV152: 'The bike is a customer’s: a sale is undone or returned on its order.',
+    mvRefused_MV153: 'A correction puts the bike at an active location.',
+    mvRefused_MV154: 'A correction leaves the bike on the bench or available: a write-off is its own step.',
+    mvRefused_MV155: 'The bike is there already.',
+    mvRefused_MV156: 'A correction needs its note.',
+    mvRefused_MV157: 'The bike has no line yet: the opening gives it one.',
+    mvRefused_MV160: 'Removing a bike needs the supervisor’s approval for it.',
+    mvRefused_MV161: 'Only a bike that is nothing yet is removed: its one movement is its receipt.',
+    mvRefused_MV162: 'The bike is named by {named}: correct that first.',
+    named_order: 'an order',
+    named_assembly: 'an assembly job',
+    named_service_order: 'a service order',
+    named_appointment: 'a workshop appointment',
+    named_loan: 'a loan',
+    named_draft: 'a transfer draft',
+    named_fleet: 'the rental fleet',
+    named_count: 'a stock count',
+    named_nfe: 'an issued invoice (NF-e)',
   },
 
   pt: {
@@ -242,6 +264,7 @@ export const movementMessages = {
     unitWord_provider: 'Devolvida ao fornecedor',
     unitWord_workshop: 'Na oficina',
     unitWord_written_off: 'Baixada',
+    unitWord_removed: 'Excluída',
     unitWord_unknown: '—',
 
     servicePhase_received: 'Recebida na oficina',
@@ -427,13 +450,33 @@ export const movementMessages = {
     mvRefused_MV146: 'Moto com alguém está com um cliente: escolha o cliente primeiro.',
     reason_origin: 'Por conta da origem',
     reason_carrier: 'Por conta da transportadora',
+    mvRefused_MV150: 'A correção precisa da aprovação do supervisor para esta moto.',
+    mvRefused_MV151: 'Esta aprovação já foi usada.',
+    mvRefused_MV152: 'A moto é de um cliente: uma venda se desfaz ou se devolve pelo seu pedido.',
+    mvRefused_MV153: 'A correção põe a moto numa unidade ativa.',
+    mvRefused_MV154: 'A correção deixa a moto em montagem ou disponível: a baixa é outro passo.',
+    mvRefused_MV155: 'A moto já está aí.',
+    mvRefused_MV156: 'A correção precisa de uma observação.',
+    mvRefused_MV157: 'A moto ainda não tem trajetória: a abertura lhe dá uma.',
+    mvRefused_MV160: 'Excluir uma moto precisa da aprovação do supervisor para ela.',
+    mvRefused_MV161: 'Só se exclui uma moto que ainda não é nada: o seu único movimento é o recebimento.',
+    mvRefused_MV162: 'A moto está em {named}: corrija isso primeiro.',
+    named_order: 'um pedido',
+    named_assembly: 'uma montagem',
+    named_service_order: 'uma ordem de serviço',
+    named_appointment: 'um agendamento da oficina',
+    named_loan: 'um empréstimo',
+    named_draft: 'um rascunho de remessa',
+    named_fleet: 'a frota de locação',
+    named_count: 'um inventário',
+    named_nfe: 'uma nota fiscal emitida',
   },
 }
 
 /**
  * A refusal's facts as i18n parameters. The facts that are themselves keys become words: a ledger state, a
- * remessa's status (the module's shipState_<status>), what holds a unit, and a movement's reason. Another
- * document's status comes as document_status, not turned into words.
+ * remessa's status (the module's shipState_<status>), what holds a unit, a movement's reason, and the document that
+ * names a unit. Another document's status comes as document_status, not turned into words.
  */
 export function refusalParams(t, facts = {}) {
   const params = { ...facts }
@@ -441,5 +484,6 @@ export function refusalParams(t, facts = {}) {
   if (facts.status) params.status = t('message.shipState_' + facts.status)
   if (facts.claim) params.claim = t('message.claim_' + facts.claim)
   if (facts.reason) params.reason = t('message.reason_' + facts.reason)
+  if (facts.named) params.named = t('message.named_' + facts.named)
   return params
 }
