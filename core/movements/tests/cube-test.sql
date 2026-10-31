@@ -54,3 +54,25 @@ SELECT m.id, 100, 500, x.q, x.l, x.t, 1, 'available' FROM m, (VALUES (-1, NULL::
 \echo '== 8. a second stay over the first, written by hand. Expect the temporal key to refuse it.'
 INSERT INTO unit_residence (serials_id, at_location_id, owner_location_id, state, during, movements_id)
 SELECT 500, 2, 2, 'available', tsrange('2026-10-02', '2026-10-03'), min(id) FROM movements;
+
+\echo '== 9. the axes: one value on one axis, every angle of the rest. Time: this moment.'
+SELECT serials_id, layer, place, owner, state, starts, why FROM cube_dots(tsrange(LOCALTIMESTAMP, LOCALTIMESTAMP, '[]'));
+
+\echo '== 10. entity: unit 502, every slice of its life, facts and plans.'
+SELECT layer, place, owner, starts, ends, why, ref_id FROM cube_dots(p_units => '{502}');
+
+\echo '== 11. place and a period: who stood at the master during October.'
+SELECT serials_id, layer, starts, ends, why FROM cube_dots(tsrange('2026-10-01', '2026-11-01'), p_places => '{location:1}');
+
+\echo '== 12. customer 7: every dot it takes part in.'
+SELECT serials_id, layer, place, starts, ends, why, ref_id FROM cube_dots(p_customer => 7);
+
+\echo '== 13. widened: a whole model (variant 100), counted per place now.'
+SELECT place, count(*) AS units FROM cube_dots(tsrange(LOCALTIMESTAMP, LOCALTIMESTAMP, '[]'), p_models => '{100}') WHERE layer = 'fact' GROUP BY place ORDER BY place;
+
+\echo '== 14. narrowed on two axes: customer 7 at a moment next week.'
+SELECT serials_id, place, why, ref_id FROM cube_dots(tsrange(date_trunc('day', LOCALTIMESTAMP) + interval '7 days 12 hours',
+       date_trunc('day', LOCALTIMESTAMP) + interval '7 days 12 hours', '[]'), p_customer => 7);
+
+\echo '== 15. the second clock: 15 Oct as the books stood on 15 Oct. Expect nothing.'
+SELECT count(*) AS dots FROM cube_dots(tsrange('2026-10-15', '2026-10-15', '[]'), p_known_at => '2026-10-15');

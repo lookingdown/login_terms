@@ -18,8 +18,10 @@ CREATE TABLE public.movements (
                     'returned', 'traded_in', 'rented', 'rental_back', 'loaned', 'loan_back',
                     'workshop_in', 'workshop_out', 'written_off', 'to_provider', 'adjusted', 'counted',
                     'corrected', 'opening')),
-    occurred_at timestamp(0) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    recorded_at timestamp(0) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- truncated, not rounded: timestamp(0) rounds, which could stamp a movement up to half a second ahead
+    -- of the moment it happened, and a slice taken right after would not see it yet
+    occurred_at timestamp(0) NOT NULL DEFAULT date_trunc('second', LOCALTIMESTAMP),
+    recorded_at timestamp(0) NOT NULL DEFAULT date_trunc('second', LOCALTIMESTAMP),
     users_id    int4 REFERENCES public.users,
     ref_type    text COLLATE public.ci_ai CHECK (ref_type IN ('purchase_items', 'transfers', 'sales', 'orders',
                     'assembly', 'stock_counts', 'loans', 'bookings', 'approvals')),

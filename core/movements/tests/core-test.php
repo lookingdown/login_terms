@@ -82,3 +82,13 @@ check('as the books stood on 15 Oct, they knew no unit yet', positionsCount($pdo
 $line = unitTrajectory($pdo, 502);
 check('bike 502\'s line: one stay, then a rental and a service planned', array_column($line, 'how') === ['opening', 'rental', 'service'], array_column($line, 'how'));
 check('two encounters cannot happen', positionsCount($pdo, positionsConflicts($pdo)) === 2, positionsConflicts($pdo)->fetchAll());
+
+// the axes: one value on one axis, every angle of the rest; narrowed or widened by adding axes
+$moment = positionsCube($pdo, ['at' => new DateTimeImmutable()])->where('c.layer = ', 'fact');
+check('a moment: every unit somewhere', positionsCount($pdo, $moment) === 4, $moment->fetchAll());
+$life = positionsCube($pdo, ['units' => [502]])->fetchAll();
+check('a unit: every slice of its life', array_column($life, 'why') === ['opening', 'rental', 'service'], array_column($life, 'why'));
+$week = positionsCube($pdo, ['customer' => 7, 'at' => (new DateTimeImmutable('today'))->modify('+7 days 12 hours')])->fetchAll();
+check('a customer at a moment next week: bike 502 with them', array_column($week, 'serials_id') === [502] && $week[0]['place'] === 'customer:7', $week);
+$road = positionsCube($pdo, ['places' => ['road:55'], 'between' => [new DateTimeImmutable('2026-10-01'), null]])->fetchAll();
+check('a place over a period: bike 500 on road 55', array_column($road, 'serials_id') === [500], $road);

@@ -172,6 +172,54 @@ SELECT w.serials_id, w.kind, w.ref_id, 'no location owns the unit then', 'owner 
   JOIN unit_residence r ON r.serials_id = w.serials_id AND r.during && w.planned
  WHERE w.kind IN ('rental', 'loan') AND r.owner_location_id IS NULL;
 
+-- The axes. The cube is dots: a unit, in a place, of an owner, in a state, for a stretch of time, for a
+-- reason. One function cuts it along any axes and always answers dots. Each axis is optional: left out it
+-- is whole; given as a point it cuts; given as a range or a set it widens.
+--   p_time      a moment '[t,t]' or a period '[a,b)': the dots that touch it
+--   p_units     units (serials_id)                p_models   every unit of these models (variants_id)
+--   p_places    places as 'location:2', 'road:55', 'customer:7', 'supplier:3'
+--   p_customer  a customer: the dots where it is the place or the owner, and the plans it is in
+--   p_known_at  the second clock: the facts as the books stood then
+-- Facts are the stays from the legs; plans are the waypoints. A dot's place and owner are 'kind:id'.
+CREATE FUNCTION public.cube_dots(p_time tsrange DEFAULT NULL, p_units int4[] DEFAULT NULL, p_models int8[] DEFAULT NULL,
+                            p_places text[] DEFAULT NULL, p_customer int4 DEFAULT NULL, p_known_at timestamp DEFAULT NULL)
+RETURNS TABLE (serials_id int4, variants_id int8, layer text, place text, owner text, state text,
+               starts timestamp, ends timestamp, why text, ref_id int8, customers_id int4)
+    LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+    WITH facts AS (
+        SELECT l.serials_id, l.variants_id, 'fact'::text AS layer,
+               CASE WHEN l.at_location_id IS NOT NULL THEN 'location:' || l.at_location_id
+                    WHEN l.at_transfer_id IS NOT NULL THEN 'road:' || l.at_transfer_id
+                    WHEN l.at_customer_id IS NOT NULL THEN 'customer:' || l.at_customer_id
+                    WHEN l.at_supplier_id IS NOT NULL THEN 'supplier:' || l.at_supplier_id
+                    ELSE 'books' END AS place,
+               CASE WHEN l.owner_location_id IS NOT NULL THEN 'location:' || l.owner_location_id
+                    WHEN l.owner_customer_id IS NOT NULL THEN 'customer:' || l.owner_customer_id
+                    WHEN l.owner_supplier_id IS NOT NULL THEN 'supplier:' || l.owner_supplier_id
+                    ELSE 'books' END AS owner,
+               l.state::text AS state,
+               tsrange(m.occurred_at, lead(m.occurred_at) OVER (PARTITION BY l.serials_id ORDER BY m.occurred_at, l.id)) AS during,
+               m.kind AS why, l.movements_id AS ref_id, COALESCE(l.at_customer_id, l.owner_customer_id) AS customers_id
+          FROM movement_legs l JOIN movements m ON m.id = l.movements_id
+         WHERE l.serials_id IS NOT NULL AND l.qty = 1 AND (p_known_at IS NULL OR m.recorded_at <= p_known_at)),
+    plans AS (
+        SELECT w.serials_id, s.variants_id, 'plan'::text,
+               w.place_kind || ':' || COALESCE(w.location_id::text, w.customers_id::text, '?'),
+               NULL::text, NULL::text, w.planned, w.kind, w.ref_id, w.customers_id
+          FROM unit_waypoints w JOIN serials s ON s.id = w.serials_id),
+    dots AS (SELECT * FROM facts WHERE NOT isempty(during) UNION ALL SELECT * FROM plans)
+    SELECT d.serials_id, d.variants_id, d.layer, d.place, d.owner, d.state, lower(d.during), upper(d.during),
+           d.why, d.ref_id, d.customers_id
+      FROM dots d
+     WHERE (p_time IS NULL OR d.during && p_time)
+       AND (p_units IS NULL OR d.serials_id = ANY (p_units))
+       AND (p_models IS NULL OR d.variants_id = ANY (p_models))
+       AND (p_places IS NULL OR d.place = ANY (p_places))
+       AND (p_customer IS NULL OR d.customers_id = p_customer)
+     ORDER BY d.serials_id, lower(d.during), d.layer
+$$;
+GRANT EXECUTE ON FUNCTION public.cube_dots(tsrange, int4[], int8[], text[], int4, timestamp) TO app_staff;
+
 GRANT SELECT ON public.unit_residence, public.unit_waypoints, public.unit_trajectory, public.unit_waypoint_conflicts TO app_staff;
 GRANT EXECUTE ON FUNCTION public.whereabouts(timestamp, timestamp) TO app_staff;
 ALTER TABLE public.unit_residence ENABLE ROW LEVEL SECURITY;

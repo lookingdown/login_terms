@@ -71,6 +71,53 @@ function positionsAt(PDO $pdo, DateTimeInterface $at, ?DateTimeInterface $knownA
     return $select->columns("{$as}.*")->from($from);
 }
 
+/**
+ * The cube cut along any axes (sql/cube.sql cube_dots()). It always answers dots: a unit, in a place,
+ * of an owner, in a state, for a stretch of time, for a reason. Leave an axis out to keep it whole;
+ * give it to cut or widen:
+ *   'at'       a moment; or 'between' => [from, to], either end null for open
+ *   'units'    [serials_id, …]          'models'   [variants_id, …]
+ *   'places'   ['location:2', 'road:55', 'customer:7', 'supplier:3', …]
+ *   'customer' customers_id: every dot it takes part in
+ *   'known'    a moment: the facts as the books stood then
+ *
+ *   positionsCube($pdo, ['at' => new DateTimeImmutable('2026-11-11 15:50')])   every angle of that moment
+ *   positionsCube($pdo, ['units' => [502]])                                     every moment of that unit
+ */
+function positionsCube(PDO $pdo, array $axes = [], ?Select $parent = null, string $as = 'c'): Select
+{
+    $select = $parent ? $parent->subSelect() : Select::new($pdo);
+    $stamp = fn (?DateTimeInterface $t): string => $t ? '"' . $t->format('Y-m-d H:i:s') . '"' : '';
+    $time = match (true) {
+        isset($axes['at']) => '[' . $stamp($axes['at']) . ',' . $stamp($axes['at']) . ']',
+        isset($axes['between']) => '[' . $stamp($axes['between'][0]) . ',' . $stamp($axes['between'][1]) . ')',
+        default => null,
+    };
+    $ids = fn (?array $list): ?string => $list === null ? null : '{' . implode(',', array_map('intval', $list)) . '}';
+    $places = $axes['places'] ?? null;
+    if ($places !== null) {
+        foreach ($places as $place) {
+            if (!preg_match('/^(location|road|customer|supplier):\d+$/', $place)) {
+                throw new InvalidArgumentException("Not a place: {$place}");
+            }
+        }
+        $places = '{' . implode(',', $places) . '}';
+    }
+    $args = [
+        'p_time' => [$time, 'tsrange'],
+        'p_units' => [$ids($axes['units'] ?? null), 'int4[]'],
+        'p_models' => [$ids($axes['models'] ?? null), 'int8[]'],
+        'p_places' => [$places, 'text[]'],
+        'p_customer' => [$axes['customer'] ?? null, 'int4'],
+        'p_known_at' => [isset($axes['known']) ? $axes['known']->format('Y-m-d H:i:s') : null, 'timestamp'],
+    ];
+    $call = [];
+    foreach ($args as $name => [$value, $type]) {
+        $call[] = "{$name} => CAST(" . $select->bindInline($value) . " AS {$type})";
+    }
+    return $select->columns("{$as}.*")->from('cube_dots(' . implode(', ', $call) . ") AS {$as}");
+}
+
 /** A unit's line through the cube: its stays in order, then what its documents plan from here on. */
 function unitTrajectory(PDO $pdo, int $serialId): array
 {

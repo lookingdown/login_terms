@@ -13,14 +13,14 @@ Everything here runs on imobee's own schema (the pg_dump of 30 October, PostgreS
 |---|---|---|
 | `movements.php` | the one require: `require_once '/var/sys/core/movements/movements.php';` | |
 | `ledger.php` | the writing side: `MovementRefused`, `movementCall()` (the one door), `movementDispatch()` | C |
-| `positions.php` | the reading side: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()`; the cube's `positionsAt()`, `unitTrajectory()`, `positionsConflicts()` | A |
+| `positions.php` | the reading side: `unitPosition()`, `stockTotal()`, `transferProgress()`, the `positions*()` Selects, `positionsCount()`; the cube's `positionsCube()` (the axes), `positionsAt()`, `unitTrajectory()`, `positionsConflicts()` | A |
 | `sql/layer.sql` | the layer: `transfer_units`, `movements`, `movement_legs`, `positions` (kept by trigger), the append-only guard, `mv_refuse()`, `mv_user()`, `movement_dispatch()`, the views on the layer, the health checks, `stock_at()`, `unit_at()`, RLS and grants | B (the views as the switch defines them) |
-| `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `whereabouts(t[, known_at])`, `unit_waypoints`, `unit_trajectory`, `unit_waypoint_conflicts` | B |
+| `sql/cube.sql` | the time axis: `unit_residence` (stays, one place at a time by PostgreSQL 18's temporal key), `whereabouts(t[, known_at])`, `unit_waypoints`, `unit_trajectory`, `unit_waypoint_conflicts`, `cube_dots()` (the axes) | B |
 | `sql/diagnostics.sql` | the draft's B0 diagnostics and reconciliation checks, with the discrepancy classes of code §3.4.1, on today's tables | before the opening |
 | `sql/cube-legacy.sql` | the cube read from today's history, as the opening will port it | before the opening |
 | `tests/dispatch-test.sql` | 11 cases in the database, on a copy of the pg_dump schema, with its forced RLS and guards | |
-| `tests/cube-test.sql` | 8 cases on the time axis: stays, slices in both clocks, the roster, conflicts, refusals | |
-| `tests/core-test.php` | 15 cases through PHP | |
+| `tests/cube-test.sql` | 15 cases on the time axis: stays, slices in both clocks, the roster, conflicts, refusals, and the cube cut along each axis | |
+| `tests/core-test.php` | 19 cases through PHP | |
 
 Run the tests in that order, on a scratch copy: `sql/layer.sql`, `sql/cube.sql`, `tests/dispatch-test.sql`, `tests/cube-test.sql`, then `php tests/core-test.php path/to/vendor/autoload.php`.
 

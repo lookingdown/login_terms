@@ -35,6 +35,39 @@ A status column is this cube cut at now and thrown away each time it is overwrit
 keeps the lines. So "now" is one cut among all of them, history is not a log kept beside the
 state but the state itself, and questions nobody thought of when it was built can still be asked.
 
+## The axes
+
+The cube is dots. Each dot is a unit, in a place, of an owner, in a state, for a stretch of time, for a
+reason. Nothing asks a table for rows. Hold one axis at a value and you get every angle of the rest. An
+axis takes a point to cut, a range or a set to widen, or nothing to stay whole. Every answer has the same
+shape, dots, so a screen or a map draws any cut the same way.
+
+| axis | at a point | widened |
+|---|---|---|
+| time | a moment: every unit, its place, owner and state then | a period: every stay that touches it |
+| unit | a serial number: every moment of its life, then its plans | a model: every unit of it |
+| place | a location, a road, a customer: who stands there | a set of places |
+| customer | every dot they take part in: their bikes, rentals, appointments, service | |
+| knowing | the books as they stood at a moment (the second clock) | |
+
+In SQL: `cube_dots(p_time, p_units, p_models, p_places, p_customer, p_known_at)`. In PHP, a Select like
+the other readers:
+
+```php
+positionsCube($pdo, ['at' => new DateTimeImmutable('2026-11-11 15:50')]);                  // every angle of that moment
+positionsCube($pdo, ['units' => [502]]);                                                     // every moment of that unit
+positionsCube($pdo, ['places' => ['location:1'], 'between' => [$october1, $november1]]);  // who stood at the master in October
+positionsCube($pdo, ['customer' => 7, 'at' => $saturdayNoon]);                              // where customer 7's bikes will be on Saturday
+```
+
+## A map beside the territory
+
+The cube is not a second system of record. It is a map drawn from the system's own records: the
+movements for the facts, the documents for the plans.
+- It is kept in the same transaction as the records it reads, so it is never behind.
+- It can be drawn again from them at any time: `unit_residence` is rebuilt from the legs.
+- The health checks compare the map with the territory.
+
 ## What it answers here
 
 - **Where every bike was on any date:** the day of a count, a night of a theft, the accountant's year end.
@@ -81,9 +114,11 @@ Small, and in the documents rather than in the layer:
 
 - **`unit_residence`:** the stays, kept from the legs. PostgreSQL 18's temporal key (`PRIMARY KEY (serials_id, during WITHOUT OVERLAPS)`) makes "one place at a time" a database rule (it needs `btree_gist`), and GiST indexes make a slice an index probe.
 - **Time runs forward per unit.** An event dated before the unit's last stay began is refused (MV002). A correction (`corrects_id`) may be dated back, and the stays are rebuilt from the legs.
+- **A movement's time is truncated to the second, never rounded.** A rounded stamp can fall half a second after the moment it marks, and a slice taken in between would miss the movement. The tests found this.
 - **`whereabouts(t[, known_at])`:** the slice, as known now or as the books stood then. A moment ahead gives the current stay with its waypoint.
 - **`unit_waypoints`:** the roster, read from bookings, appointments, service orders, loans and orders' holds, with the actual beside the planned where the document records it.
 - **`unit_trajectory`** and **`unit_waypoint_conflicts`**.
-- **In PHP** (`positions.php`): `positionsAt()` is a slice you can narrow, page, join and nest, like the other readers. Beside it are `unitTrajectory()` and `positionsConflicts()`.
+- **`cube_dots()`:** the axes above.
+- **In PHP** (`positions.php`): `positionsCube()` gives the axes, and `positionsAt()` a slice. Both are Selects you can narrow, page, join and nest, like the other readers. Beside them are `unitTrajectory()` and `positionsConflicts()`.
 
 Counted goods have no identity and so no line. They live in the same cube by quantity: `positions` is now, `stock_at(t)` is the slice, and the road of a remessa holds what is on it.
