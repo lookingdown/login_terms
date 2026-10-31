@@ -302,3 +302,17 @@ try {
 }
 $pdo->rollBack();
 check('undone: bike 503 on its road again', cubeDot($pdo, ['unit' => 503])['place'] === "road:{$transferId}");
+
+// the model lines, the organisation's units and a unit's actions (positions.php, units.php, cube.php)
+$lines = modelLines($pdo, [200, 100], 1);
+check('model lines, in the order asked: the master\'s helmets 2 here, 3 on the roads out; its bikes 2 here and 1 on the bench, 2 on the roads, one paid line waiting',
+    array_keys($lines) === [200, 100] && $lines[200]['here'] === ['available' => 2, 'validating' => 0] && $lines[200]['road'] === ['in' => 0, 'out' => 3]
+    && $lines[200]['sellable'] === 2 && $lines[100]['here'] === ['available' => 2, 'validating' => 1] && $lines[100]['road']['out'] === 2
+    && $lines[100]['sellable'] === -1 && $lines[100]['serial'] === true, $lines);
+$transit = unitsList($pdo, ['word' => 'transit']);
+check('the organisation\'s units, by word: the two on the roads', $transit['meta']['totalRows'] === 2 && $transit['meta']['scope'] === 'organisation'
+    && array_column($transit['data'], 'id') == [503, 500], [array_column($transit['data'], 'id'), $transit['meta']['counts']]);
+check('a unit\'s actions: bike 504 on the bench may be built, written off, returned or corrected; bike 500 on its road only corrected',
+    unitActions(unitRows($pdo, [504])[0]) === ['built', 'written_off', 'to_provider', 'corrected'] && unitActions(unitRows($pdo, [500])[0]) === ['corrected'],
+    [unitActions(unitRows($pdo, [504])[0]), unitActions(unitRows($pdo, [500])[0])]);
+

@@ -1,5 +1,6 @@
 -- The supervisor's correction (event 24) and the removal of a unit that is nothing yet, on the fixture after
--- stock-test.sql: a supplier's delivery of three bikes, approvals for corrections and removals, a unit with no line.
+-- stock-test.sql: a supplier's delivery of three bikes, approvals for corrections and removals, a unit with no line;
+-- then a remessa swapped after it arrived, and one the master sends from a shop.
 -- Run it after stock-test.sql. Some statements fail on purpose: each \echo says what to look for.
 \set ON_ERROR_STOP 0
 \pset footer off
@@ -106,10 +107,49 @@ SELECT serials_id, place_kind, location_id, owner_location_id FROM unit_position
 SELECT movement_rent_back(61);
 SELECT movement_correct(514, 37, 2, NULL, NULL, 'at Prudente');
 
-\echo '== 18. the journal: the corrections and the removal, newest first. Expect corrected ×3 by their approvals, then receipt_corrected.'
+\echo '== 18. remessa 60 took bike 520 to Prudente, where it was received; but bike 521 is what went. Expect MV077: 521 came in after the dispatch.'
+SET session_replication_role = replica;
+INSERT INTO serials (id, variants_id, serial_number, location_id) OVERRIDING SYSTEM VALUE
+VALUES (520, 100, '9C2KC1650PR000520', 1), (521, 100, '9C2KC1650PR000521', 1), (522, 100, '9C2KC1650PR000522', 1);
+INSERT INTO purchases (id, supplier_name, status, location_id, source_location_id) OVERRIDING SYSTEM VALUE VALUES (14, 'Matriz', 'ordered', 2, 1), (15, 'Prudente', 'ordered', 1, 2);
+INSERT INTO purchase_items (id, purchases_id, variants_id, items_id, sku, qty_expected) OVERRIDING SYSTEM VALUE
+VALUES (341, 14, 100, 10, 'MX-VERDE', 1), (351, 15, 100, 10, 'MX-VERDE', 1);
+INSERT INTO transfers (id, shop_purchases_id, status, location_id, to_location_id, expected_at) OVERRIDING SYSTEM VALUE
+VALUES (60, 14, 'draft', 1, 2, date_trunc('day', LOCALTIMESTAMP) + interval '1 day 10 hours'),
+       (61, 15, 'draft', 2, 1, date_trunc('day', LOCALTIMESTAMP) + interval '1 day 16 hours');
+INSERT INTO transfer_items (transfers_id, variants_id, items_id, sku, qty, shop_purchase_items_id)
+VALUES (60, 100, 10, 'MX-VERDE', 1, 341), (61, 100, 10, 'MX-VERDE', 1, 351);
+SET session_replication_role = origin;
+SELECT mv_post('opening', NULL, NULL, mv_pair(100, 520, 1, '{"state": "available"}', '{"at_location_id": 1, "owner_location_id": 1, "state": "available"}')
+                                   || mv_pair(100, 522, 1, '{"state": "available"}', '{"at_location_id": 1, "owner_location_id": 1, "state": "available"}')) \g /dev/null
+SELECT claim_hold(60, 520) \g /dev/null
+UPDATE transfers SET status = 'sent' WHERE id = 60;
+SELECT movement_dispatch(60) \g /dev/null
+SELECT mv_post('opening', NULL, NULL, mv_pair(100, 521, 1, '{"state": "available"}', '{"at_location_id": 1, "owner_location_id": 1, "state": "available"}')) \g /dev/null
+SELECT set_config('app.location', '2', false) \g /dev/null
+SELECT movement_arrive(60, 341, 1, '[520]') ->> 'on_road' AS on_road;
+SELECT set_config('app.location', '1', false) \g /dev/null
+UPDATE transfers SET status = 'received' WHERE id = 60;
+SELECT movement_swap(60, 520, 521);
+
+\echo '== 19. the real one is bike 510, which draft 59 holds. Expect MV076.'
+SELECT movement_swap(60, 520, 510);
+
+\echo '== 20. the real one is bike 522. Expect arrived true: 520 back at the master, 522 at Prudente and Prudente''s; the remessa holds 522.'
+SELECT movement_swap(60, 520, 522, 'the van carried 522');
+SELECT serials_id, location_id, owner_location_id, state FROM unit_positions WHERE serials_id IN (520, 522) ORDER BY serials_id;
+SELECT serials_id FROM transfer_units WHERE transfers_id = 60;
+
+\echo '== 21. the master sends bike 522 from Prudente back (a remessa from a shop): it holds it on draft 61 and dispatches it. Expect held, then 2 legs; 522 on road 61, Prudente''s.'
+SELECT claim_hold(61, 522);
+UPDATE transfers SET status = 'sent' WHERE id = 61;
+SELECT movement_dispatch(61);
+SELECT serials_id, place_kind, transfers_id, owner_location_id FROM unit_positions WHERE serials_id = 522;
+
+\echo '== 22. the journal: the corrections and the removal, newest first. Expect corrected ×3 by their approvals, then receipt_corrected.'
 SELECT kind, ref_type, ref_id, note FROM movements WHERE kind IN ('corrected', 'receipt_corrected') ORDER BY id DESC LIMIT 4;
 
-\echo '== 19. the health checks. Expect every count 0.'
+\echo '== 23. the health checks. Expect every count 0.'
 SELECT (SELECT count(*) FROM movement_check_balance) AS balance, (SELECT count(*) FROM movement_check_chain) AS chain,
        (SELECT count(*) FROM movement_check_positions) AS positions, (SELECT count(*) FROM movement_check_serial_mix) AS serial_mix,
        (SELECT count(*) FROM movement_check_roads) AS roads;

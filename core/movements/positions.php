@@ -76,3 +76,61 @@ function positionsFrom(PDO $pdo, ?Select $parent, string $from, string $as): Sel
     $select = $parent ? $parent->subSelect() : Select::new($pdo);
     return $select->columns("{$as}.*")->from($from);
 }
+
+/**
+ * The model lines of CONTRACT.md for these models at one location ($location null: the session's own), keyed by
+ * variants_id in the order given: what it has standing there, its own, available and validating (`here`); what its
+ * till may sell (`sellable`); what remessas carry to it and from it (`road`); its own standing elsewhere, out on a
+ * rental or a loan or at another location (`elsewhere`). A model it has none of answers zeros.
+ */
+function modelLines(PDO $pdo, array $variantIds, ?int $location = null): array
+{
+    $ids = array_values(array_unique(array_map('intval', $variantIds)));
+    if ($ids === []) {
+        return [];
+    }
+    $location ??= (int) Select::new($pdo)->columns('app_location()')->fetchValue();
+    $models = Select::new($pdo)
+        ->columns('v.id', 'v.sku', 'v.items_id', 'i.name AS item_name', 'i.segment', 'i.serial', 'v.price', 'v.low_stock')
+        ->from('variants AS v')->join('INNER', 'items AS i', 'i.id = v.items_id')
+        ->where('v.id IN ', $ids)->fetchAll();
+    $sums = Select::new($pdo);
+    $l = fn (): string => 'CAST(' . $sums->bindInline($location) . ' AS int4)';
+    $home = "p.at_location_id = {$l()} AND p.owner_location_id = {$l()}";
+    $sums->columns('p.variants_id',
+            "COALESCE(SUM(p.qty) FILTER (WHERE {$home} AND p.state = 'available'), 0) AS available",
+            "COALESCE(SUM(p.qty) FILTER (WHERE p.at_location_id = {$l()} AND p.owner_location_id = {$l()} AND p.state = 'validating'), 0) AS validating",
+            "COALESCE(SUM(p.qty) FILTER (WHERE t.to_location_id = {$l()} AND p.state <> 'written_off'), 0) AS road_in",
+            "COALESCE(SUM(p.qty) FILTER (WHERE p.at_transfer_id IS NOT NULL AND p.owner_location_id = {$l()} AND p.state <> 'written_off'), 0) AS road_out",
+            "COALESCE(SUM(p.qty) FILTER (WHERE p.owner_location_id = {$l()} AND p.at_transfer_id IS NULL
+                                           AND p.at_location_id IS DISTINCT FROM {$l()} AND p.state <> 'written_off'), 0) AS elsewhere")
+        ->from('positions AS p')
+        ->join('LEFT', 'transfers AS t', 't.id = p.at_transfer_id')
+        ->where('p.variants_id IN ', $ids)
+        ->groupBy('p.variants_id');
+    $at = array_column($sums->fetchAll(), null, 'variants_id');
+    $sellable = positionsSellable($pdo)->resetColumns()->columns('ss.variants_id', 'ss.qty')
+        ->where('ss.location_id = ', $location)->where('ss.variants_id IN ', $ids)->fetchKeyPair();
+
+    $byId = array_column($models, null, 'id');
+    $lines = [];
+    foreach ($ids as $id) {
+        if (!isset($byId[$id])) {
+            continue;
+        }
+        $m = $byId[$id];
+        $p = $at[$id] ?? [];
+        $lines[$id] = [
+            'variants_id' => $id, 'sku' => $m['sku'], 'items_id' => (int) $m['items_id'], 'item_name' => $m['item_name'],
+            'segment' => $m['segment'], 'serial' => (bool) $m['serial'],
+            'price' => $m['price'] === null ? null : (float) $m['price'],
+            'low_stock' => $m['low_stock'] === null ? null : (int) $m['low_stock'],
+            'here' => ['available' => (int) ($p['available'] ?? 0), 'validating' => (int) ($p['validating'] ?? 0)],
+            'sellable' => (int) ($sellable[$id] ?? 0),
+            'road' => ['in' => (int) ($p['road_in'] ?? 0), 'out' => (int) ($p['road_out'] ?? 0)],
+            'elsewhere' => (int) ($p['elsewhere'] ?? 0),
+        ];
+    }
+    return $lines;
+}
+

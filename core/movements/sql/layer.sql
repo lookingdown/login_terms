@@ -676,18 +676,23 @@ BEGIN
     RETURN mv_take_off(p_transfers_id, p_variants_id, p_qty, p_units, true, p_bears, p_note);
 END $$;
 
--- Event 9, swapped: the chassis that went was not the one the remessa names. A correction dated at the dispatch:
--- the named unit (r·A·s) → (A·A·s), it never left; the real one (A·A·s) → (r·A·s), it went. The master's (MV070);
--- the same model (MV075); the real one free at the origin (MV076) and unmoved since the dispatch (MV077). The
--- remessa's units follow (transfer_units).
+-- Event 9, swapped: the chassis that went was not the one the remessa names. On the road, a correction dated at the
+-- dispatch: the named unit (r·A·s) → (A·A·s), it never left; the real one (A·A·s) → (r·A·s), it went. Arrived (the
+-- destination took the named unit in, but the real one is on its floor), a correction dated at the named unit's
+-- arrival: the named unit (B·B·s) → (A·A·s), the real one (A·A·s) → (B·B·s), each where it really stands. The
+-- master's (MV070); a remessa sent or received (MV012); the named unit on its road, or arrived by it and unmoved since
+-- (MV071) and held by nothing there (MV055); the same model (MV075); the real one free at the origin (MV076) and
+-- unmoved since the dispatch (MV077). The remessa's units follow (transfer_units).
 CREATE FUNCTION public.movement_swap(p_transfers_id int8, p_named int4, p_real int4, p_note text DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
     v_user     int4 := mv_user();   -- an empty session is refused before anything else
     v_transfer transfers%ROWTYPE;
     v_dispatch movements%ROWTYPE;
+    v_arrival  movements%ROWTYPE;
     v_named    movement_legs%ROWTYPE;
     v_real     movement_legs%ROWTYPE;
+    v_arrived  boolean;
     v_facts    jsonb := jsonb_build_object('transfers_id', p_transfers_id, 'named', p_named, 'real', p_real);
 BEGIN
     IF NOT app_at_master() THEN
@@ -697,15 +702,22 @@ BEGIN
     IF NOT FOUND THEN
         PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
     END IF;
-    IF v_transfer.status <> 'sent' THEN
-        PERFORM mv_refuse('MV012', format('Transfer %s is %s, not sent.', p_transfers_id, v_transfer.status),
+    IF v_transfer.status NOT IN ('sent', 'received') THEN
+        PERFORM mv_refuse('MV012', format('Transfer %s is %s: it was not sent.', p_transfers_id, v_transfer.status),
                           v_facts || jsonb_build_object('status', v_transfer.status));
     END IF;
     PERFORM 1 FROM serials WHERE id IN (p_named, p_real) ORDER BY id FOR UPDATE;
     v_named := mv_unit_leg(p_named);
     v_real := mv_unit_leg(p_real);
-    IF v_named.id IS NULL OR v_named.at_transfer_id IS DISTINCT FROM p_transfers_id OR v_named.state = 'written_off' THEN
+    SELECT * INTO v_arrival FROM movements WHERE id = v_named.movements_id;
+    v_arrived := v_arrival.kind = 'arrived' AND v_arrival.ref_type = 'transfers' AND v_arrival.ref_id = p_transfers_id
+                 AND v_named.at_location_id = v_transfer.to_location_id AND v_named.owner_location_id = v_transfer.to_location_id;
+    IF v_named.id IS NULL OR v_named.state = 'written_off'
+       OR NOT (v_named.at_transfer_id IS NOT DISTINCT FROM p_transfers_id OR COALESCE(v_arrived, false)) THEN
         PERFORM mv_refuse('MV071', 'The unit is not on this road.', v_facts || jsonb_build_object('serials_id', p_named));
+    END IF;
+    IF v_arrived AND EXISTS (SELECT 1 FROM unit_claims c WHERE c.serials_id = p_named) THEN
+        PERFORM mv_refuse('MV055', 'The unit is held by something else.', v_facts || jsonb_build_object('claim', mv_unit_claim(p_named)));
     END IF;
     IF v_real.id IS NULL OR v_real.variants_id <> v_named.variants_id THEN
         PERFORM mv_refuse('MV075', 'The real unit is another model.', v_facts);
@@ -720,15 +732,25 @@ BEGIN
         PERFORM mv_refuse('MV077', 'The real unit moved after the dispatch: correct it first.', v_facts);
     END IF;
 
-    PERFORM mv_post('swapped', 'transfers', p_transfers_id,
-                    mv_pair(v_named.variants_id, p_named, 1, mv_cell(v_named),
-                            mv_cell(v_named) || jsonb_build_object('at_transfer_id', NULL, 'at_location_id', v_transfer.location_id))
-                    || mv_pair(v_real.variants_id, p_real, 1, mv_cell(v_real),
-                               mv_cell(v_real) || jsonb_build_object('at_location_id', NULL, 'at_transfer_id', p_transfers_id)),
-                    p_note, v_dispatch.occurred_at, v_dispatch.id);
+    IF v_arrived THEN
+        PERFORM mv_post('swapped', 'transfers', p_transfers_id,
+                        mv_pair(v_named.variants_id, p_named, 1, mv_cell(v_named),
+                                mv_cell(v_named) || jsonb_build_object('at_location_id', v_transfer.location_id, 'owner_location_id', v_transfer.location_id))
+                        || mv_pair(v_real.variants_id, p_real, 1, mv_cell(v_real),
+                                   mv_cell(v_real) || jsonb_build_object('at_location_id', v_transfer.to_location_id,
+                                                                         'owner_location_id', v_transfer.to_location_id)),
+                        p_note, v_arrival.occurred_at, v_arrival.id);
+    ELSE
+        PERFORM mv_post('swapped', 'transfers', p_transfers_id,
+                        mv_pair(v_named.variants_id, p_named, 1, mv_cell(v_named),
+                                mv_cell(v_named) || jsonb_build_object('at_transfer_id', NULL, 'at_location_id', v_transfer.location_id))
+                        || mv_pair(v_real.variants_id, p_real, 1, mv_cell(v_real),
+                                   mv_cell(v_real) || jsonb_build_object('at_location_id', NULL, 'at_transfer_id', p_transfers_id)),
+                        p_note, v_dispatch.occurred_at, v_dispatch.id);
+    END IF;
     DELETE FROM transfer_units WHERE transfers_id = p_transfers_id AND serials_id = p_named;
     INSERT INTO transfer_units VALUES (p_transfers_id, p_real) ON CONFLICT DO NOTHING;
-    RETURN jsonb_build_object('swapped', true, 'named', p_named, 'real', p_real);
+    RETURN jsonb_build_object('swapped', true, 'named', p_named, 'real', p_real, 'arrived', COALESCE(v_arrived, false));
 END $$;
 
 -- What a unit or a model cost a location, from its receipt there: a remessa's price if it arrived by remessa, else
@@ -1012,7 +1034,8 @@ BEGIN
     RETURN v_cell;
 END $$;
 
--- A remessa draft holds a unit at its origin (transfer_units): the draft's own rows. Holding twice is nothing.
+-- A remessa draft holds a unit at its origin (transfer_units): the draft's own rows. Holding twice is nothing. From
+-- the draft's own seat, or the master's (a remessa the master decides from a shop, relocateStock).
 CREATE FUNCTION public.claim_hold(p_transfers_id int8, p_serials_id int4) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -1024,7 +1047,7 @@ BEGIN
     IF NOT FOUND THEN
         PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
     END IF;
-    IF v_transfer.location_id IS DISTINCT FROM app_location() THEN
+    IF NOT (app_at_master() OR v_transfer.location_id = app_location()) THEN
         PERFORM mv_refuse('MV093', 'The document is another location''s.', v_facts || jsonb_build_object('location_id', v_transfer.location_id));
     END IF;
     IF v_transfer.status <> 'draft' THEN
@@ -1038,7 +1061,8 @@ BEGIN
     RETURN jsonb_build_object('held', true);
 END $$;
 
--- A draft lets a unit go, or every unit it holds (p_serials_id null): the draft saved without it, or discarded.
+-- A draft lets a unit go, or every unit it holds (p_serials_id null): the draft saved without it, or discarded. From
+-- the draft's own seat, or the master's.
 CREATE FUNCTION public.claim_release(p_transfers_id int8, p_serials_id int4 DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -1051,7 +1075,7 @@ BEGIN
     IF NOT FOUND THEN
         PERFORM mv_refuse('MV011', 'Transfer not found.', v_facts);
     END IF;
-    IF v_transfer.location_id IS DISTINCT FROM app_location() THEN
+    IF NOT (app_at_master() OR v_transfer.location_id = app_location()) THEN
         PERFORM mv_refuse('MV093', 'The document is another location''s.', v_facts || jsonb_build_object('location_id', v_transfer.location_id));
     END IF;
     IF v_transfer.status <> 'draft' THEN

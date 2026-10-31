@@ -183,15 +183,8 @@ function stockUnitsList(PDO $pdo, array $in, ?int $location = null): array
     $location ??= (int) Select::new($pdo)->columns('app_location()')->fetchValue();
     $here = "location:{$location}";
     $scope = ($in['scope'] ?? 'current') === 'all' ? 'all' : 'current';
-    $word = (string) ($in['word'] ?? '');
-    $search = trim((string) ($in['search'] ?? ''));
-    $variantsId = (int) ($in['variants_id'] ?? 0);
-    $page = max(1, (int) ($in['page'] ?? 1));
-    $pageSize = max(1, min(100, (int) ($in['pageSize'] ?? 30)));
 
-    $candidates = Select::new($pdo)->columns('s.id')->from('serials AS s')
-        ->join('INNER', 'variants AS v', 'v.id = s.variants_id')
-        ->join('INNER', 'items AS i', 'i.id = v.items_id');
+    $candidates = unitCandidates($pdo, $in);
     $dots = cubeSelect($pdo, $scope === 'current' ? ['at' => 'now', 'layer' => 'fact'] : ['layer' => 'fact'], $candidates)
         ->resetColumns()->columns('c.unit')
         ->join('LEFT', 'transfers AS t', "c.place = 'road:' || t.id")
@@ -201,16 +194,47 @@ function stockUnitsList(PDO $pdo, array $in, ?int $location = null): array
     }
     $dots->catWhere(')');
     $candidates->where('s.id IN ', $dots);
+    return unitsPage($pdo, $candidates, $in, ['scope' => $scope]);
+}
+
+/**
+ * Every unit of the organisation (Unidades), a page of them: $in as stockUnitsList()'s, without a scope. A seat sees
+ * the units RLS lets it see; the master, all of them.
+ */
+function unitsList(PDO $pdo, array $in): array
+{
+    return unitsPage($pdo, unitCandidates($pdo, $in), $in, ['scope' => 'organisation']);
+}
+
+/** The units a list starts from: serials, narrowed by $in's search (number, SKU, name; 2 characters) and model. */
+function unitCandidates(PDO $pdo, array $in): Select
+{
+    $candidates = Select::new($pdo)->columns('s.id')->from('serials AS s')
+        ->join('INNER', 'variants AS v', 'v.id = s.variants_id')
+        ->join('INNER', 'items AS i', 'i.id = v.items_id');
+    $search = trim((string) ($in['search'] ?? ''));
     if (mb_strlen($search) >= 2) {
         $like = '%' . $search . '%';
         $candidates->where('(s.serial_number LIKE ', $like)->catWhere(' OR v.sku LIKE ', $like)
             ->catWhere(' OR i.name LIKE ', $like)->catWhere(')');
     }
-    if ($variantsId > 0) {
-        $candidates->where('s.variants_id = ', $variantsId);
+    if ((int) ($in['variants_id'] ?? 0) > 0) {
+        $candidates->where('s.variants_id = ', (int) $in['variants_id']);
     }
-    $units = unitRows($pdo, $candidates->orderBy('s.created_at DESC', 's.id DESC')->fetchColumn(), ['purchase', 'cost', 'price']);
+    return $candidates;
+}
 
+/**
+ * A page of Units (with purchase, cost and price) from a candidates Select, newest first, filtered by $in's word;
+ * the page counts every candidate's word (scopeTotal, counts) beside $meta.
+ */
+function unitsPage(PDO $pdo, Select $candidates, array $in, array $meta): array
+{
+    $word = (string) ($in['word'] ?? '');
+    $page = max(1, (int) ($in['page'] ?? 1));
+    $pageSize = max(1, min(100, (int) ($in['pageSize'] ?? 30)));
+    $units = unitRows($pdo, array_map('intval', $candidates->orderBy('s.created_at DESC', 's.id DESC')->fetchColumn()),
+                      ['purchase', 'cost', 'price']);
     $counts = array_count_values(array_column($units, 'word'));
     $listed = $word === '' ? $units : array_values(array_filter($units, fn (array $u) => $u['word'] === $word));
     $totalPages = max(1, (int) ceil(count($listed) / $pageSize));
@@ -220,8 +244,7 @@ function stockUnitsList(PDO $pdo, array $in, ?int $location = null): array
         'meta' => [
             'totalRows' => count($listed), 'totalPages' => $totalPages, 'currentPage' => $page,
             'previousPage' => $page > 1 ? $page - 1 : null, 'nextPage' => $page < $totalPages ? $page + 1 : null,
-            'scope' => $scope, 'scopeTotal' => count($units), 'counts' => $counts,
-        ],
+        ] + $meta + ['scopeTotal' => count($units), 'counts' => $counts],
     ];
 }
 

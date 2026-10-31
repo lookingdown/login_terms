@@ -204,11 +204,12 @@ function movementLost(PDO $pdo, int $transferId, int $variantId, int $qty, array
 }
 
 /**
- * Event 9, swapped: the chassis that went was not the one the remessa names. A correction dated at the dispatch:
- * the named unit never left, the real one went. The master's; the same model; the real one free at the origin and
- * unmoved since the dispatch.
+ * Event 9, swapped: the chassis that went was not the one the remessa names. On the road, a correction dated at the
+ * dispatch: the named unit never left, the real one went. Arrived (the destination took the named one in, the real
+ * one is on its floor), a correction dated at the arrival: the two change places, each where it really stands
+ * (`arrived` true). The master's; the same model; the real one free at the origin and unmoved since the dispatch.
  *
- * @return array{swapped: bool, named: int, real: int}
+ * @return array{swapped: bool, named: int, real: int, arrived: bool}
  */
 function movementSwap(PDO $pdo, int $transferId, int $namedSerialId, int $realSerialId, ?string $note = null): array
 {

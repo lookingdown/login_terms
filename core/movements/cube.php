@@ -81,6 +81,32 @@ function cubeActions(): array
     ];
 }
 
+/**
+ * The dot actions that fit a unit where it stands now, for a screen to offer (getSerial's `actions`): built and back
+ * to the bench by its open assembly job; the write-off, the return to the provider and the quick transfer for a unit
+ * at home and held by nothing; the supervisor's correction for any unit no customer owns. A hint: the database keeps
+ * the last word on each.
+ */
+function unitActions(array $unit): array
+{
+    $p = $unit['position'] ?? null;
+    if ($p === null) {
+        return [];
+    }
+    $home = str_starts_with($p['place'], 'location:') && $p['place'] === $p['owner'];
+    $free = ($unit['claim'] ?? null) === null;
+    $bench = ($unit['bench'] ?? null) !== null;
+    $fits = [
+        'built' => $home && $bench && $p['state'] === 'validating',
+        'back_to_bench' => $home && $bench && $free && $p['state'] === 'available',
+        'written_off' => $home && $free && in_array($p['state'], ['validating', 'available'], true),
+        'to_provider' => $home && $free && in_array($p['state'], ['validating', 'available'], true),
+        'flipped' => $home && $free && $p['state'] === 'available',
+        'corrected' => !str_starts_with($p['owner'], 'customer:'),
+    ];
+    return array_values(array_filter(array_keys(cubeActions()), fn (string $a) => $fits[$a] ?? false));
+}
+
 /** The dots along the axes given, as a Select: narrow it, page it, join it, or nest it in another query. */
 function cubeSelect(PDO $pdo, array $axes = [], ?Select $parent = null, string $as = 'c'): Select
 {
